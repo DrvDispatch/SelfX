@@ -4,8 +4,8 @@ Automatic function calling is DISABLED — we intercept each FunctionCall and ru
 through SelfX's own validated job pipeline locally, then hand the model back only a
 small result summary. File bytes never go to Google."""
 
-import json
 import logging
+import os
 import uuid
 
 from sqlalchemy.orm import Session
@@ -20,7 +20,19 @@ _MAX_STEPS = 6
 
 
 def available() -> bool:
+    if settings.gemini_use_vertex:
+        cred = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        return bool(settings.gemini_project) and bool(cred) and os.path.exists(cred)
     return bool(settings.gemini_api_key)
+
+
+def _client():
+    from google import genai
+
+    if settings.gemini_use_vertex:
+        # credentials picked up from GOOGLE_APPLICATION_CREDENTIALS (service account)
+        return genai.Client(vertexai=True, project=settings.gemini_project, location=settings.gemini_location)
+    return genai.Client(api_key=settings.gemini_api_key)
 
 
 def _declarations(specs: list[dict]):
@@ -28,18 +40,20 @@ def _declarations(specs: list[dict]):
 
     decls = []
     for s in specs:
-        decls.append(types.FunctionDeclaration(
-            name=s["name"], description=s["description"], parameters=s["parameters"]
-        ))
+        params = core.gemini_safe_schema(s["parameters"])
+        # a no-arg function must omit parameters entirely for Gemini
+        kwargs = {"name": s["name"], "description": s["description"]}
+        if params.get("properties"):
+            kwargs["parameters"] = params
+        decls.append(types.FunctionDeclaration(**kwargs))
     return [types.Tool(function_declarations=decls)]
 
 
 def run(db: Session, user: User, message: str, attached_file_ids: list[uuid.UUID],
         history: list[dict] | None = None) -> tuple[str, list[dict]]:
-    from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=settings.gemini_api_key, vertexai=settings.gemini_use_vertex)
+    client = _client()
     specs = core.build_specs()
     manifest = core.file_manifest(db, user, attached_file_ids)
     sys = _SYSTEM

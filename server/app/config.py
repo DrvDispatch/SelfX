@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     gemini_use_vertex: bool = False
+    # Vertex AI (service-account auth): project + region; credentials come from the
+    # GOOGLE_APPLICATION_CREDENTIALS env var (path to the service-account json).
+    gemini_project: str = ""
+    gemini_location: str = "us-central1"
 
     # --- dev convenience (SPEC §10 "non-debug mode") ---
     debug: bool = False

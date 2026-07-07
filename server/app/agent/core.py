@@ -85,6 +85,37 @@ def build_specs() -> list[dict]:
     return specs
 
 
+def gemini_safe_schema(s: dict | None) -> dict:
+    """Reduce our JSON-Schema to Gemini's stricter OpenAPI subset: keep type/description/
+    properties/required/items and STRING enums only; numeric enums fold into the
+    description (the backend still enforces the real schema). Drops title/default/format/
+    min*/max*/pattern/additionalProperties which Gemini rejects or ignores."""
+    if not isinstance(s, dict):
+        return {"type": "string"}
+    t = s.get("type", "object")
+    out: dict = {"type": t}
+    desc = s.get("description", "")
+    if t == "object":
+        props = s.get("properties") or {}
+        out["properties"] = {k: gemini_safe_schema(v) for k, v in props.items()}
+        req = [r for r in (s.get("required") or []) if r in props]
+        if req:
+            out["required"] = req
+    elif t == "array":
+        out["items"] = gemini_safe_schema(s.get("items") or {"type": "string"})
+    elif t == "string":
+        enum = s.get("enum")
+        if enum and all(isinstance(e, str) for e in enum):
+            out["enum"] = enum
+    elif t in ("integer", "number"):
+        enum = s.get("enum")
+        if enum:
+            desc = (desc + f" (allowed: {', '.join(str(e) for e in enum)})").strip()
+    if desc:
+        out["description"] = desc
+    return out
+
+
 def file_manifest(db: Session, user: User, file_ids: list[uuid.UUID]) -> list[dict]:
     if not file_ids:
         return []
