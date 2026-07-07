@@ -1,5 +1,6 @@
 """ebook-convert: convert between ebook formats with Calibre's ebook-convert CLI."""
 
+import os
 import shutil
 
 from .base import Tool, ToolContext, ToolError
@@ -42,7 +43,11 @@ class EbookConvert(Tool):
             raise ToolError(f"the file is already in {to} format")
         out = ctx.output_dir / f"{src.stem}.{to}"
         ctx.progress(0.3, f"converting to {to}")
-        ctx.run_cmd(["ebook-convert", str(src), str(out)], timeout=600)
+        # Isolate Calibre's config dir per job so parallel jobs don't contend on
+        # the shared ~/.config/calibre lock / plugin cache under concurrency.
+        cal_cfg = ctx.workdir / "calibre_config"
+        env = {**os.environ, "CALIBRE_CONFIG_DIRECTORY": str(cal_cfg)}
+        ctx.run_cmd(["ebook-convert", str(src), str(out)], timeout=600, env=env)
         if not out.is_file() or out.stat().st_size == 0:
             raise ToolError("conversion produced no output — the ebook may be DRM-protected")
         ctx.progress(1.0, "done")

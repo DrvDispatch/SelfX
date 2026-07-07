@@ -1,9 +1,13 @@
 """image-to-text: OCR an image to plain text with RapidOCR (PP-OCR models, CPU/ONNX)."""
 
+from ._imaging import downscale_max, flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
 _ENGINE = None  # cache the OCR engine across jobs in this worker
+# Downscale oversized inputs before detection to cut memory / time; large scans
+# past this size gain little accuracy and dominate CPU cost.
+_MAX_DIM = 1536
 
 
 def _engine():
@@ -35,9 +39,21 @@ class ImageToText(Tool):
 
     def run(self, ctx: ToolContext) -> None:
         src = ctx.input_paths[0]
+        # load_image applies the decompression-bomb guard (huge scans OOM the worker)
+        img = load_image(src)
+        ocr_input = str(src)
+        if max(img.size) > _MAX_DIM:
+            # re-materialise the downscaled image so the engine still reads a file
+            # path (identical code path) but a far smaller one
+            small = flatten_rgb(downscale_max(img, _MAX_DIM))
+            tmp = ctx.workdir / "ocr_input.jpg"
+            small.save(tmp, "JPEG", quality=92)
+            small.close()
+            ocr_input = str(tmp)
+        img.close()
         ctx.progress(0.3, "reading text (first run loads the model)")
         try:
-            result, _ = _engine()(str(src))
+            result, _ = _engine()(ocr_input)
         except Exception:
             raise ToolError("OCR failed — the file may not be a readable image") from None
         lines = [row[1] for row in result] if result else []

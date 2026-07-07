@@ -1,8 +1,10 @@
 """pdf-to-images: render each PDF page to an image with PDFium (permissive)."""
 
+import io
 import zipfile
 
 import pypdfium2 as pdfium
+from PIL import Image
 
 from .base import Tool, ToolContext, ToolError
 from .registry import register
@@ -51,25 +53,48 @@ class PdfToImages(Tool):
             n = len(doc)
             if n == 0:
                 raise ToolError("the PDF has no pages")
-            rendered: list = []
-            for i in range(n):
-                ctx.progress(i / n, f"rendering page {i + 1} of {n}")
-                bitmap = doc[i].render(scale=scale)
-                pil = bitmap.to_pil()
-                if pil_fmt == "JPEG":
-                    pil = pil.convert("RGB")
-                out = ctx.workdir / f"page_{i + 1:04d}.{fmt}"
-                pil.save(out, pil_fmt)
-                rendered.append(out)
-            if len(rendered) == 1:
-                target = ctx.output_dir / f"{src.stem}.{fmt}"
-                rendered[0].replace(target)
+            if n == 1:
+                ctx.progress(0.1, "rendering page 1 of 1")
+                data = self._render_page(doc, 0, scale, pil_fmt)
+                (ctx.output_dir / f"{src.stem}.{fmt}").write_bytes(data)
             else:
-                ctx.progress(0.95, "zipping pages")
+                # Render straight into the zip as ZIP_STORED: PNG/JPEG bytes are
+                # already compressed, so DEFLATE + per-page temp files just waste
+                # CPU and double the I/O.
                 with zipfile.ZipFile(ctx.output_dir / f"{src.stem}-pages.zip", "w",
-                                     zipfile.ZIP_DEFLATED) as zf:
-                    for p in rendered:
-                        zf.write(p, arcname=p.name)
+                                     zipfile.ZIP_STORED) as zf:
+                    for i in range(n):
+                        ctx.progress(i / n, f"rendering page {i + 1} of {n}")
+                        data = self._render_page(doc, i, scale, pil_fmt)
+                        zf.writestr(f"page_{i + 1:04d}.{fmt}", data)
         finally:
             doc.close()
         ctx.progress(1.0, "done")
+
+    def _render_page(self, doc, index: int, scale: float, pil_fmt: str) -> bytes:
+        page = doc[index]
+        bitmap = page.render(scale=scale)
+        try:
+            pil = bitmap.to_pil()
+            if pil_fmt == "JPEG":
+                # Composite any alpha onto white BEFORE dropping the channel, or
+                # transparent PDF regions come out black in the JPEG.
+                if pil.mode in ("RGBA", "LA") or (pil.mode == "P" and "transparency" in pil.info):
+                    rgba = pil.convert("RGBA")
+                    flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                    flat.paste(rgba, mask=rgba.split()[-1])
+                    pil = flat
+                elif pil.mode != "RGB":
+                    pil = pil.convert("RGB")
+            buf = io.BytesIO()
+            pil.save(buf, pil_fmt)
+            return buf.getvalue()
+        finally:
+            try:
+                bitmap.close()
+            except Exception:
+                pass
+            try:
+                page.close()
+            except Exception:
+                pass

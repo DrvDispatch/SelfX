@@ -11,14 +11,19 @@ import subprocess
 import time
 
 from ..config import settings
+from ._media import guard_output_size, probe
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
-# preset -> (output extension, argv fragment appended after the input)
+# preset -> (output extension, argv fragment appended after the input).
+# webm-vp9 is tuned for the CPU-only box: -cpu-used 4 -deadline good keeps libvpx
+# out of its brutally-slow default, and -row-mt/-tile-columns use multiple cores.
 _PRESETS: dict[str, tuple[str, list[str]]] = {
     "mp4-h264": ("mp4", ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac",
                           "-b:a", "160k", "-movflags", "+faststart"]),
-    "webm-vp9": ("webm", ["-c:v", "libvpx-vp9", "-b:v", "0", "-row-mt", "1",
+    "webm-vp9": ("webm", ["-c:v", "libvpx-vp9", "-b:v", "0",
+                          "-cpu-used", "4", "-deadline", "good",
+                          "-row-mt", "1", "-tile-columns", "2",
                           "-c:a", "libopus"]),
     "mp3": ("mp3", ["-vn", "-c:a", "libmp3lame", "-q:a", "2"]),
     "opus": ("opus", ["-vn", "-c:a", "libopus", "-b:a", "128k"]),
@@ -28,6 +33,39 @@ _PRESETS: dict[str, tuple[str, list[str]]] = {
                     "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];"
                     "[s0]palettegen[p];[s1][p]paletteuse"]),
 }
+
+# libx264 -preset choices, exposed so a CPU-bound user can trade speed for size.
+_X264_SPEEDS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
+                "medium", "slow", "slower", "veryslow"]
+
+# Hard duration cap (seconds) for the gif preset — it has no duration param, so a
+# 2-hour source would otherwise feed the whole timeline through palettegen.
+_GIF_MAX_SECONDS = 30
+
+
+def _copy_override(info: dict, preset: str) -> list[str] | None:
+    """Return a stream-copy fragment when the source already matches the target.
+
+    Turns a container change / same-codec convert into a near-instant, lossless
+    remux instead of a full re-encode. Returns None when a re-encode is required.
+    """
+    ac, vc = info.get("acodec"), info.get("vcodec")
+    has_a, has_v = info.get("audio"), info.get("video")
+    if preset == "mp4-h264":
+        if has_v and vc == "h264" and (not has_a or ac == "aac"):
+            return ["-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart"]
+    elif preset == "webm-vp9":
+        if has_v and vc in ("vp9",) and (not has_a or ac in ("opus", "vorbis")):
+            return ["-c:v", "copy", "-c:a", "copy"]
+    elif preset == "mp3" and ac == "mp3":
+        return ["-vn", "-c:a", "copy"]
+    elif preset == "opus" and ac == "opus":
+        return ["-vn", "-c:a", "copy"]
+    elif preset == "flac" and ac == "flac":
+        return ["-vn", "-c:a", "copy"]
+    elif preset == "wav" and ac == "pcm_s16le":
+        return ["-vn", "-c:a", "copy"]
+    return None
 
 
 @register
@@ -59,6 +97,13 @@ class MediaConvert(Tool):
                 "minimum": 0,
                 "maximum": 51,
             },
+            "speed": {
+                "type": "string",
+                "title": "Encoder speed (mp4/h264)",
+                "description": "Faster = quicker encode, larger file. Only used for mp4-h264.",
+                "enum": _X264_SPEEDS,
+                "default": "medium",
+            },
         },
         "required": ["preset"],
     }
@@ -82,13 +127,42 @@ class MediaConvert(Tool):
         ext, frag = spec
         src = ctx.input_paths[0]
         out_path = ctx.output_dir / f"{src.stem}.{ext}"
-        duration = self._duration(ctx, src)
+
+        info = probe(ctx, src)
+        # Friendly, distinct errors instead of an opaque ffmpeg "no stream" tail.
+        # Only reject when the probe clearly worked, so a probe failure can't
+        # falsely block a real conversion.
+        probe_worked = info["video"] or info["audio"] or info["duration"] is not None
+        if probe_worked:
+            if preset in ("mp4-h264", "webm-vp9", "gif") and not info["video"]:
+                raise ToolError(
+                    "this file has no video track — pick an audio format "
+                    "(mp3, opus, wav, flac) instead"
+                )
+            if preset in ("mp3", "opus", "wav", "flac") and not info["audio"]:
+                raise ToolError("this file has no audio track to convert")
+        duration = info["duration"] or self._duration(ctx, src)
 
         argv = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src)]
-        argv += list(frag)
-        crf = ctx.params.get("crf")
-        if crf is not None and preset in ("mp4-h264", "webm-vp9"):
-            argv += ["-crf", str(int(crf))]
+        override = None if preset == "gif" else _copy_override(info, preset)
+        if override is not None:
+            # Same-codec / container-only change: lossless remux, no re-encode.
+            argv += override
+            ctx.progress(0.05, "remuxing (no re-encode)")
+        else:
+            frag = list(frag)
+            if preset == "mp4-h264":
+                speed = str(ctx.params.get("speed", "medium"))
+                if speed in _X264_SPEEDS and "-preset" in frag:
+                    frag[frag.index("-preset") + 1] = speed
+            argv += frag
+            crf = ctx.params.get("crf")
+            if crf is None and preset == "webm-vp9":
+                crf = 32  # VP9 CQ mode needs a -crf; -b:v 0 alone is undefined quality
+            if crf is not None and preset in ("mp4-h264", "webm-vp9"):
+                argv += ["-crf", str(int(crf))]
+            if preset == "gif":
+                argv += ["-t", str(_GIF_MAX_SECONDS)]
         argv += ["-progress", "pipe:1", "-nostats", str(out_path)]
 
         err_path = ctx.workdir / "ffmpeg.err"
@@ -120,7 +194,9 @@ class MediaConvert(Tool):
                             pass
                     elif key == "progress" and value == "end":
                         ctx.progress(0.99, "finalizing")
-                ret = proc.wait(timeout=30)
+                # Give the finalize/mux as long as the remaining job budget allows
+                # (a large mp4/webm on slow disk can legitimately take >30s).
+                ret = proc.wait(timeout=max(30.0, deadline - time.monotonic()))
             except ToolError:
                 raise
             except Exception:
@@ -132,6 +208,7 @@ class MediaConvert(Tool):
             raise ToolError(f"ffmpeg failed: {tail or 'the input may be unsupported or corrupt'}")
         if not out_path.is_file() or out_path.stat().st_size == 0:
             raise ToolError("conversion produced no output")
+        guard_output_size(out_path, "converted file")
         ctx.progress(1.0, "done")
 
     @staticmethod

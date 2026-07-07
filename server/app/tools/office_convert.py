@@ -9,6 +9,7 @@ import shutil
 import httpx
 
 from ..config import settings
+from ._docutil import validate_pdf_output
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -63,8 +64,9 @@ class OfficeConvert(Tool):
         else:
             self._via_libreoffice(ctx, src, out_path)
 
-        if not out_path.is_file() or out_path.stat().st_size == 0:
-            raise ToolError("conversion produced no output — the file may be unsupported or corrupt")
+        # Validate SEMANTIC output: a real PDF with >= 1 page, not just size > 0.
+        # LibreOffice/Gotenberg can emit a valid-but-blank PDF from garbage input.
+        validate_pdf_output(out_path, min_pages=1)
         ctx.progress(1.0, "saved PDF")
 
     def _via_gotenberg(self, src, out_path, landscape: bool) -> None:

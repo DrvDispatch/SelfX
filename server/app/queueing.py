@@ -25,12 +25,21 @@ def get_queue(name: str = "default") -> Queue:
     return _queues[name]
 
 
-def enqueue_job(job_id: uuid.UUID | str, queue_name: str = "default") -> str:
-    """Enqueue app.worker.run_tool(job_id) on the given queue; returns the RQ job id."""
+def enqueue_job(
+    job_id: uuid.UUID | str,
+    queue_name: str = "default",
+    params: dict | None = None,
+) -> str:
+    """Enqueue app.worker.run_tool(job_id[, params]) on the given queue; returns the
+    RQ job id. `params` carries the REAL (un-redacted) parameters to the worker as a
+    job argument so secrets never have to be persisted in cleartext in the DB."""
     queue = get_queue(queue_name)
+    call_args: list = [str(job_id)]
+    if params is not None:
+        call_args.append(params)
     rq_job = queue.enqueue(
         "app.worker.run_tool",
-        str(job_id),
+        *call_args,
         job_timeout=settings.job_timeout_seconds,
         result_ttl=3600,
         failure_ttl=86400,

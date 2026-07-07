@@ -1,7 +1,6 @@
 """image-to-ico: build a multi-resolution Windows .ico (favicon) from an image."""
 
-from PIL import Image
-
+from ._imaging import load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -20,11 +19,8 @@ class ImageToIco(Tool):
 
     def run(self, ctx: ToolContext) -> None:
         src = ctx.input_paths[0]
-        try:
-            img = Image.open(src)
-            img.load()
-        except Exception:
-            raise ToolError("the file is not a readable image") from None
+        # load_image applies EXIF orientation and guards against decompression bombs
+        img = load_image(src)
         if img.mode != "RGBA":
             img = img.convert("RGBA")
         sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]

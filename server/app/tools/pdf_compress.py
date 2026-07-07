@@ -4,6 +4,8 @@ Ghostscript is AGPL-flagged (REPORT §2.1) and reached only through this one ada
 with fixed argv flags — no user string ever becomes a gs option.
 """
 
+import shutil
+
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -51,6 +53,11 @@ class PdfCompress(Tool):
                 "-sDEVICE=pdfwrite",
                 "-dCompatibilityLevel=1.6",
                 f"-dPDFSETTINGS={setting}",
+                # De-duplicate repeated images and subset/compress fonts so the
+                # re-encode actually shrinks image- and font-heavy documents.
+                "-dDetectDuplicateImages=true",
+                "-dCompressFonts=true",
+                "-dSubsetFonts=true",
                 "-dNOPAUSE",
                 "-dBATCH",
                 "-dQUIET",
@@ -61,4 +68,14 @@ class PdfCompress(Tool):
         )
         if not out_path.is_file() or out_path.stat().st_size == 0:
             raise ToolError("compression produced no output — the PDF may be corrupt")
-        ctx.progress(1.0, "done")
+        # Never hand back a file bigger than the input: Ghostscript's re-encode can
+        # inflate already-optimized, vector-heavy, or text-only PDFs. If there's no
+        # gain, replace the output with the original bytes and report no reduction.
+        src_size = src.stat().st_size
+        out_size = out_path.stat().st_size
+        if out_size >= src_size:
+            shutil.copyfile(src, out_path)
+            ctx.progress(1.0, f"already optimal — kept original ({src_size:,} bytes, no gain)")
+        else:
+            saved = 100.0 * (1.0 - out_size / src_size) if src_size else 0.0
+            ctx.progress(1.0, f"compressed {src_size:,} → {out_size:,} bytes ({saved:.0f}% smaller)")

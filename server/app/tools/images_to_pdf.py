@@ -1,8 +1,8 @@
 """images-to-pdf: combine one or more images into a single PDF (img2pdf, lossless)."""
 
 import img2pdf
-from PIL import Image
 
+from ._imaging import flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -31,19 +31,14 @@ class ImagesToPdf(Tool):
         total = len(ctx.input_paths)
         for i, path in enumerate(ctx.input_paths):
             ctx.progress(i / total, f"preparing image {i + 1} of {total}")
+            # load_image applies EXIF orientation (no sideways pages) and the
+            # decompression-bomb guard; prefix the file index onto its message
             try:
-                img = Image.open(path)
-                img.load()
-            except Exception:
-                raise ToolError(f"file #{i + 1} is not a readable image") from None
+                img = load_image(path)
+            except ToolError as exc:
+                raise ToolError(f"file #{i + 1}: {exc}") from None
             # img2pdf rejects alpha; flatten onto white and normalise to RGB JPEG
-            if img.mode in ("RGBA", "LA", "P"):
-                bg = Image.new("RGB", img.size, (255, 255, 255))
-                rgba = img.convert("RGBA")
-                bg.paste(rgba, mask=rgba.split()[-1])
-                img = bg
-            else:
-                img = img.convert("RGB")
+            img = flatten_rgb(img)
             tmp = ctx.workdir / f"img_{i:04d}.jpg"
             img.save(tmp, "JPEG", quality=90)
             img.close()

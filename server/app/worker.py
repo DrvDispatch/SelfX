@@ -56,35 +56,82 @@ def _mark_failed(job_id: UUID, message: str) -> None:
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Multi-part extensions that Path.suffix/Path.stem would split incorrectly.
+_COMPOUND_SUFFIXES = (
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tar.zst",
+    ".tar.lz",
+    ".tar.lzma",
+    ".tar.z",
+)
+
+
+def _split_suffixes(name: str) -> tuple[str, str]:
+    """Split a filename into (base, extension) honouring compound extensions
+    ('.tar.gz') so we don't chop 'backup.tar.gz' into ('backup.tar', '.gz')."""
+    lowered = name.lower()
+    for suf in _COMPOUND_SUFFIXES:
+        if lowered.endswith(suf) and len(name) > len(suf):
+            return name[: -len(suf)], name[-len(suf):]
+    p = Path(name)
+    return p.stem, p.suffix
+
 
 def _nice_stem(name: str) -> str:
-    stem = _UNSAFE.sub("_", Path(name).stem).strip("._")
+    """The user's original filename with its extension removed and reduced to a
+    filesystem-/header-safe stem. Handles compound extensions so 'backup.tar.gz'
+    yields 'backup' (not 'backup.tar')."""
+    base, _ = _split_suffixes(Path(name).name)
+    stem = _UNSAFE.sub("_", base).strip("._")
     return (stem or "output")[:80]
+
+
+def _unique_target(target: Path) -> Path:
+    """Return `target`, or `target` with a '-N' counter inserted before the
+    extension if it already exists, so a nice-name collision never falls back to
+    leaving the ugly uuid name in place."""
+    if not target.exists():
+        return target
+    base, suf = _split_suffixes(target.name)
+    i = 1
+    while True:
+        cand = target.with_name(f"{base}-{i}{suf}")
+        if not cand.exists():
+            return cand
+        i += 1
 
 
 def _rename_outputs(out_dir: Path, input_files: list[File]) -> None:
     """Rename outputs named after the internal uuid input stem back to the user's
-    original filename stem, so downloads are friendly (e.g. invoice-compressed.pdf)."""
+    original filename stem, so downloads are friendly (e.g. invoice-compressed.pdf,
+    backup.tar.gz, page.gz). Already-nice fixed names a tool chose itself
+    (merged.pdf, qr.png, archive.zip, answer.txt) do not start with a uuid stem and
+    are left untouched."""
     mapping: dict[str, str] = {}
     for f in input_files:
-        uuid_stem = Path(f.stored_path).stem
+        # The stored name is "<uuid><suffix>"; strip *everything* after the first
+        # dot so a compound stored suffix ('<uuid>.tar.gz') still yields the bare uuid.
+        uuid_stem = Path(f.stored_path).name.split(".", 1)[0]
         nice = _nice_stem(f.orig_name)
         if uuid_stem and nice and uuid_stem != nice:
             mapping[uuid_stem] = nice
     if not mapping:
         return
-    for p in list(out_dir.rglob("*")):
-        if not p.is_file():
-            continue
+    for p in [q for q in out_dir.rglob("*") if q.is_file()]:
         for uuid_stem, nice in mapping.items():
-            if p.name.startswith(uuid_stem):
-                target = p.with_name(nice + p.name[len(uuid_stem):])
-                if target != p and not target.exists():
-                    try:
-                        p.rename(target)
-                    except OSError:
-                        pass
-                break
+            if not p.name.startswith(uuid_stem):
+                continue
+            # Preserve everything the tool appended after the uuid: markers and
+            # extensions alike ("-compressed.pdf", ".tar.gz", ".gz", "").
+            target = p.with_name(nice + p.name[len(uuid_stem):])
+            if target != p:
+                try:
+                    p.rename(_unique_target(target))
+                except OSError:
+                    pass
+            break
 
 
 def _register_outputs(db, job: Job) -> int:
@@ -110,8 +157,12 @@ def _register_outputs(db, job: Job) -> int:
     return count
 
 
-def run_tool(job_id: str) -> None:
-    """Execute one job: queued -> running -> done/error, wiping the workdir in finally."""
+def run_tool(job_id: str, params: dict | None = None) -> None:
+    """Execute one job: queued -> running -> done/error, wiping the workdir in finally.
+
+    `params` carries the REAL parameters straight from the enqueue call so secrets
+    (e.g. pdf passwords) never have to be read back from the DB, where they are stored
+    redacted. When absent (older jobs / retries) we fall back to the redacted DB copy."""
     jid = UUID(str(job_id))
     workdir = None
     try:
@@ -151,15 +202,31 @@ def run_tool(job_id: str) -> None:
             out_dir = outputs_dir(jid)
             out_dir.mkdir(parents=True, exist_ok=True)
 
+            effective_params = dict(params) if params is not None else dict(job.params or {})
             ctx = ToolContext(
                 job_id=jid,
                 input_paths=input_paths,
-                params=dict(job.params or {}),
+                params=effective_params,
                 workdir=workdir,
                 output_dir=out_dir,
                 progress_cb=lambda fraction, message="": _set_progress(jid, fraction, message),
             )
             tool.run(ctx)
+
+            # Output-size guard: a small input can still produce a huge result
+            # (uncapped gif/webm, OCR PDF/A bloat, media-download). Refuse to keep
+            # or register a result set larger than the configured ceiling.
+            max_output_bytes = settings.max_output_mb * 1024 * 1024
+            total_output = 0
+            for op in out_dir.rglob("*"):
+                if op.is_file():
+                    try:
+                        total_output += op.stat().st_size
+                    except OSError:
+                        pass
+            if total_output > max_output_bytes:
+                shutil.rmtree(out_dir, ignore_errors=True)
+                raise ToolError("output exceeds the size limit")
 
             _rename_outputs(out_dir, inputs)
             n_outputs = _register_outputs(db, job)

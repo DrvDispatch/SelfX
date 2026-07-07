@@ -4,6 +4,7 @@ Note: downloading from some sites may violate their Terms of Service — this is
 user-responsibility feature. Only http(s) URLs are accepted.
 """
 
+from ._media import max_output_bytes
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -46,6 +47,22 @@ class MediaDownload(Tool):
             raise ToolError("please provide a valid http(s) URL")
         mode = str(ctx.params.get("format", "video"))
 
+        size_cap = max_output_bytes()
+
+        def _hook(d: dict) -> None:
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                got = d.get("downloaded_bytes") or 0
+                # abort a runaway download early instead of filling the disk
+                if got and got > size_cap:
+                    raise ToolError(
+                        f"the download exceeded the {size_cap // (1024 * 1024)} MB limit"
+                    )
+                if total:
+                    ctx.progress(0.2 + 0.7 * min(1.0, got / total), "downloading")
+            elif d.get("status") == "finished":
+                ctx.progress(0.92, "processing")
+
         opts = {
             "outtmpl": str(ctx.workdir / "%(title).80s.%(ext)s"),
             "noplaylist": True,
@@ -53,6 +70,12 @@ class MediaDownload(Tool):
             "no_warnings": True,
             "restrictfilenames": True,
             "noprogress": True,
+            # bound time and disk: cap size, time out idle sockets, limit retries
+            "max_filesize": size_cap,
+            "socket_timeout": 30,
+            "retries": 3,
+            "fragment_retries": 3,
+            "progress_hooks": [_hook],
         }
         if mode == "audio":
             opts["format"] = "bestaudio/best"
@@ -64,16 +87,35 @@ class MediaDownload(Tool):
         ctx.progress(0.2, "downloading")
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
+                info = ydl.extract_info(url, download=False)
+                if isinstance(info, dict) and info.get("is_live"):
+                    raise ToolError(
+                        "live streams can't be downloaded — wait until the stream has ended"
+                    )
+                ydl.process_ie_result(info, download=True)
+        except ToolError:
+            raise
         except Exception as exc:  # noqa: BLE001 - yt-dlp raises many types
             msg = str(exc).splitlines()[-1][:200] if str(exc) else "download failed"
             raise ToolError(f"could not download: {msg}") from None
 
         moved = 0
+        total_bytes = 0
         for p in sorted(ctx.workdir.iterdir()):
             if p.is_file():
+                total_bytes += p.stat().st_size
                 p.replace(ctx.output_dir / p.name)
                 moved += 1
         if moved == 0:
             raise ToolError("nothing was downloaded from that URL")
+        if total_bytes > size_cap:
+            for p in ctx.output_dir.iterdir():
+                if p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+            raise ToolError(
+                f"the download is larger than the {size_cap // (1024 * 1024)} MB limit"
+            )
         ctx.progress(1.0, "done")

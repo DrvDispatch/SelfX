@@ -15,6 +15,10 @@ _PROMPT = {
                 "as bullets, decisions made, and action items.",
 }
 
+# Map-reduce sizing for long recordings (a 2-hour meeting far exceeds one context).
+_CHUNK_CHARS = 10_000
+_MAX_CHUNKS = 12
+
 
 @register
 class AudioSummary(Tool):
@@ -46,6 +50,7 @@ class AudioSummary(Tool):
         from .transcribe import _get_model
 
         length = str(ctx.params.get("length", "medium"))
+        instruction = _PROMPT.get(length, _PROMPT["medium"])
         src = ctx.input_paths[0]
         ctx.progress(0.15, "transcribing audio")
         model = _get_model()
@@ -55,11 +60,40 @@ class AudioSummary(Tool):
             raise ToolError("no speech was detected in the recording")
 
         ctx.progress(0.7, "writing notes with local AI")
-        notes = _ollama.chat([
-            {"role": "system", "content": "You write clear, structured notes from transcripts."},
-            {"role": "user", "content": f"{_PROMPT.get(length, _PROMPT['medium'])}\n\n"
-                                        f"Transcript:\n{transcript[:24000]}"},
-        ])
+        # Map-reduce long transcripts instead of silently dropping the back half.
+        chunks = [transcript[i:i + _CHUNK_CHARS] for i in range(0, len(transcript), _CHUNK_CHARS)]
+        truncated = len(chunks) > _MAX_CHUNKS
+        if truncated:
+            chunks = chunks[:_MAX_CHUNKS]
+
+        if len(chunks) <= 1:
+            notes = _ollama.chat([
+                {"role": "system", "content": "You write clear, structured notes from transcripts."},
+                {"role": "user", "content": f"{instruction}\n\nTranscript:\n{transcript}"},
+            ])
+        else:
+            partials = []
+            for i, chunk in enumerate(chunks):
+                ctx.progress(0.7 + 0.2 * (i / len(chunks)), f"summarizing part {i + 1}/{len(chunks)}")
+                part = _ollama.chat([
+                    {"role": "system", "content": "You write clear, structured notes from transcripts."},
+                    {"role": "user", "content":
+                        f"This is part {i + 1} of {len(chunks)} of a meeting transcript. List the "
+                        f"key points, decisions, and action items mentioned in THIS part.\n\n{chunk}"},
+                ])
+                partials.append(part)
+            ctx.progress(0.9, "combining notes")
+            combined = "\n\n".join(partials)
+            notes = _ollama.chat([
+                {"role": "system", "content": "You write clear, structured notes from transcripts."},
+                {"role": "user", "content":
+                    f"{instruction}\n\nThe text below is notes from consecutive parts of ONE "
+                    f"recording. Merge them into one coherent set of notes without duplication.\n\n{combined}"},
+            ])
+
+        if truncated:
+            notes += "\n\n[Note: the recording was long; these notes cover only its first portion.]"
+
         stem = src.stem
         (ctx.output_dir / f"{stem}-notes.txt").write_text(notes, encoding="utf-8")
         (ctx.output_dir / f"{stem}-transcript.txt").write_text(transcript, encoding="utf-8")

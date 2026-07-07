@@ -5,6 +5,17 @@ import zipfile
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
+# Extensions whose bytes are already compressed: DEFLATE gains ~nothing on them
+# while costing real CPU and a double read, so these members are stored verbatim
+# (ZIP_STORED). Everything else stays ZIP_DEFLATED.
+_ALREADY_COMPRESSED = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".avif",
+    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v",
+    ".mp3", ".aac", ".m4a", ".ogg", ".oga", ".opus", ".flac",
+    ".zip", ".7z", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".rar",
+    ".pdf", ".docx", ".xlsx", ".pptx",
+}
+
 
 @register
 class ArchiveCompress(Tool):
@@ -36,7 +47,12 @@ class ArchiveCompress(Tool):
             with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for i, path in enumerate(ctx.input_paths):
                     ctx.progress(i / total, f"adding {path.name}")
-                    zf.write(path, arcname=path.name)
+                    compress = (
+                        zipfile.ZIP_STORED
+                        if path.suffix.lower() in _ALREADY_COMPRESSED
+                        else zipfile.ZIP_DEFLATED
+                    )
+                    zf.write(path, arcname=path.name, compress_type=compress)
         elif fmt == "7z":
             try:
                 import py7zr

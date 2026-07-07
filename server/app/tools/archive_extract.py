@@ -54,7 +54,18 @@ class ArchiveExtract(Tool):
         elif name.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")):
             self._extract_tar(ctx, src, dest)
         elif name.endswith(".gz"):
-            self._extract_gz(ctx, src, dest)
+            # A '.tar.gz' upload is stored as '<uuid>.gz' (safe_suffix keeps only
+            # the final suffix), so dispatching on the name alone would merely
+            # gunzip it to a single '.tar'. Sniff the content: if it is really a
+            # (compressed) tar, un-tar it fully; otherwise plain-gunzip it.
+            try:
+                is_tar = tarfile.is_tarfile(src)
+            except Exception:
+                is_tar = False
+            if is_tar:
+                self._extract_tar(ctx, src, dest)
+            else:
+                self._extract_gz(ctx, src, dest)
         else:
             raise ToolError("unsupported archive type")
         ctx.progress(1.0, "extracted")
@@ -68,12 +79,20 @@ class ArchiveExtract(Tool):
             infos = zf.infolist()
             if len(infos) > MAX_ENTRIES:
                 raise ToolError(f"archive has too many entries (>{MAX_ENTRIES})")
+            # Bit 0 of the general-purpose flag marks an encrypted entry. We have
+            # no password path, so fail early with a clear message rather than
+            # dying deep in zf.open() with a raw Runtime('File is encrypted').
+            if any(info.flag_bits & 0x1 for info in infos):
+                raise ToolError(
+                    "the zip archive is password-protected — extraction is not supported"
+                )
             total_uncompressed = sum(i.file_size for i in infos)
             total_compressed = sum(i.compress_size for i in infos) or 1
             if total_uncompressed > MAX_TOTAL_BYTES:
                 raise ToolError("archive expands to more than 2 GiB — refusing to extract")
             if total_uncompressed / total_compressed > MAX_RATIO:
                 raise ToolError("archive compression ratio looks like a zip bomb — refusing")
+            few = len(infos) <= 200
             for idx, info in enumerate(infos):
                 target = _safe_join(dest, info.filename)
                 if info.is_dir():
@@ -82,7 +101,9 @@ class ArchiveExtract(Tool):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as srcf, target.open("wb") as outf:
                     shutil.copyfileobj(srcf, outf, length=1024 * 64)
-                if idx % 50 == 0:
+                # Move the bar per entry for small archives (few large members
+                # otherwise sit at one value); throttle for huge archives.
+                if few or idx % 50 == 0:
                     ctx.progress(0.2 + 0.7 * idx / len(infos), "extracting")
 
     def _extract_7z(self, ctx: ToolContext, src: Path, dest: Path) -> None:
@@ -92,18 +113,35 @@ class ArchiveExtract(Tool):
             raise ToolError("the 7z engine is not available on this server") from None
         try:
             with py7zr.SevenZipFile(src, "r") as zf:
+                # No password path here — surface a clear message instead of the
+                # generic 'internal error' py7zr raises deep inside extractall.
+                if getattr(zf, "needs_password", lambda: False)():
+                    raise ToolError(
+                        "the 7z archive is password-protected — extraction is not supported"
+                    )
                 infos = zf.list()
                 if len(infos) > MAX_ENTRIES:
                     raise ToolError(f"archive has too many entries (>{MAX_ENTRIES})")
                 total = sum(getattr(i, "uncompressed", 0) or 0 for i in infos)
                 if total > MAX_TOTAL_BYTES:
                     raise ToolError("archive expands to more than 2 GiB — refusing to extract")
+                # 7z carries no per-entry compress_size in list(); guard against a
+                # zip-bomb by comparing declared expansion against the archive size
+                # on disk (only catches inflated-but-declared sizes, but that is a
+                # cheap improvement over having no ratio check at all for 7z).
+                compressed = src.stat().st_size or 1
+                if total / compressed > MAX_RATIO:
+                    raise ToolError("archive compression ratio looks like a zip bomb — refusing")
                 for i in infos:  # reject traversal before extracting
                     _safe_join(dest, i.filename)
                 ctx.progress(0.5, "extracting")
                 zf.extractall(path=str(dest))
         except py7zr.exceptions.Bad7zFile:
             raise ToolError("the file is not a valid 7z archive") from None
+        except py7zr.exceptions.PasswordRequired:
+            raise ToolError(
+                "the 7z archive is password-protected — extraction is not supported"
+            ) from None
 
     def _extract_tar(self, ctx: ToolContext, src: Path, dest: Path) -> None:
         try:
@@ -143,5 +181,8 @@ class ArchiveExtract(Tool):
                     if written > MAX_TOTAL_BYTES:
                         raise ToolError("decompressed output exceeds 2 GiB — refusing")
                     outf.write(chunk)
+        except EOFError:
+            # gzip raises EOFError (not OSError) on a truncated stream.
+            raise ToolError("the gzip archive is truncated or incomplete") from None
         except OSError:
             raise ToolError("the file is not a valid gzip archive") from None

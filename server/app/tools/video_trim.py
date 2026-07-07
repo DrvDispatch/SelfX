@@ -1,5 +1,6 @@
-"""video-trim: cut a clip out of a video with FFmpeg (accurate re-encode)."""
+"""video-trim: cut a clip out of a video with FFmpeg (accurate re-encode, or fast copy)."""
 
+from ._media import guard_output_size, validate_time
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -30,22 +31,39 @@ class VideoTrim(Tool):
                 "minimum": 0.1,
                 "maximum": 86400,
             },
+            "copy": {
+                "type": "boolean",
+                "title": "Fast lossless cut",
+                "description": "Copy streams without re-encoding (near-instant, but cuts "
+                               "snap to the nearest keyframe so the start may be slightly off).",
+                "default": False,
+            },
         },
         "required": ["duration"],
     }
 
     def run(self, ctx: ToolContext) -> None:
-        start = str(ctx.params.get("start", "0")).strip() or "0"
+        start = validate_time(ctx.params.get("start", "0"), "start")
         duration = float(ctx.params["duration"])
         src = ctx.input_paths[0]
-        out = ctx.output_dir / f"{src.stem}-clip.mp4"
+        copy = bool(ctx.params.get("copy", False))
+
+        if copy:
+            # Keyframe-aligned stream copy: instant + lossless, keep the source container.
+            out = ctx.output_dir / f"{src.stem}-clip{src.suffix.lower() or '.mp4'}"
+            enc = ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+        else:
+            out = ctx.output_dir / f"{src.stem}-clip.mp4"
+            enc = ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac",
+                   "-movflags", "+faststart"]
+
         ctx.progress(0.3, "trimming")
         ctx.run_cmd([
             "ffmpeg", "-hide_banner", "-nostdin", "-y",
             "-ss", start, "-i", str(src), "-t", str(duration),
-            "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac",
-            "-movflags", "+faststart", str(out),
+            *enc, str(out),
         ])
         if not out.is_file() or out.stat().st_size == 0:
             raise ToolError("trim failed — check the start time is within the video")
+        guard_output_size(out, "clip")
         ctx.progress(1.0, "done")

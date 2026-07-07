@@ -1,5 +1,6 @@
 """pdf-split: extract a page range, or burst every page into a zip (SPEC §8)."""
 
+import io
 import zipfile
 
 import pikepdf
@@ -16,8 +17,10 @@ def _parse_pages(spec: str, total: int) -> list[int]:
             continue
         if "-" in part:
             a, _, b = part.partition("-")
+            # Open-ended ranges: '5-' means page 5 to the end, '-3' means start to page 3.
             try:
-                start, end = int(a), int(b)
+                start = int(a) if a else 1
+                end = int(b) if b else total
             except ValueError:
                 raise ToolError(f"invalid page range '{part}'") from None
         else:
@@ -54,7 +57,7 @@ class PdfSplit(Tool):
             "pages": {
                 "type": "string",
                 "title": "Pages",
-                "description": "e.g. 1-3,7 — leave empty to split every page into a separate PDF",
+                "description": "e.g. 1-3,7 (open-ended '5-' or '-3' also work) — leave empty to split every page into a separate PDF",
                 "default": "",
                 "maxLength": 200,
             }
@@ -86,18 +89,20 @@ class PdfSplit(Tool):
                 ctx.progress(1.0, "saved split.pdf")
             else:
                 zip_path = ctx.output_dir / "pages.zip"
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Burst mode: serialize each one-page PDF into memory and store it
+                # uncompressed (ZIP_STORED). PDF page streams are already compressed,
+                # so DEFLATE + per-page temp files only waste CPU and double the I/O.
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
                     for i in range(total):
                         ctx.progress(i / total, f"page {i + 1} of {total}")
                         one = pikepdf.new()
+                        buf = io.BytesIO()
                         try:
                             one.pages.append(src.pages[i])
-                            page_path = ctx.workdir / f"page_{i + 1:04d}.pdf"
-                            one.save(page_path)
+                            one.save(buf)
                         finally:
                             one.close()
-                        zf.write(page_path, arcname=page_path.name)
-                        page_path.unlink(missing_ok=True)
+                        zf.writestr(f"page_{i + 1:04d}.pdf", buf.getvalue())
                 ctx.progress(1.0, f"burst {total} pages into pages.zip")
         finally:
             src.close()

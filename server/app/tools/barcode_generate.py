@@ -49,11 +49,23 @@ class BarcodeGenerate(Tool):
             cls = barcode.get_barcode_class(code_type)
             obj = cls(data, writer=writer)
         except Exception:
+            hint = " — Code39 data must be uppercase" if code_type == "code39" else ""
             raise ToolError(
-                f"'{data}' is not valid for a {code_type} barcode (check the required digits)"
+                f"'{data}' is not valid for a {code_type} barcode "
+                f"(check the required digits/characters){hint}"
             ) from None
-        # .save() appends the correct extension itself
-        saved = obj.save(str(ctx.output_dir / "barcode"))
+        # .save() renders the image; the PNG path needs Pillow (and its bundled
+        # font). This runs OUTSIDE the validation try above, so wrap it too or a
+        # missing Pillow becomes an uncaught 'internal error'.
+        try:
+            saved = obj.save(str(ctx.output_dir / "barcode"))
+        except ImportError:
+            raise ToolError(
+                "PNG barcode rendering requires the Pillow library, which is not "
+                "installed — try the SVG format instead"
+            ) from None
+        except Exception:
+            raise ToolError("barcode image rendering failed") from None
         if not saved:
             raise ToolError("barcode generation failed")
         ctx.progress(1.0, "done")

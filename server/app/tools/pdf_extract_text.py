@@ -31,7 +31,11 @@ class PdfExtractText(Tool):
         total = len(reader.pages) or 1
         for i, page in enumerate(reader.pages):
             ctx.progress(i / total, f"reading page {i + 1}")
-            parts.append(page.extract_text() or "")
+            # One malformed page must not abort the whole document — skip it.
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                parts.append("")
         text = "\n\n".join(parts).strip()
         if not text:
             raise ToolError("no text found — this PDF may be scanned; run OCR first")

@@ -4,11 +4,20 @@ The model is loaded once per worker process and cached. First use downloads the
 model weights, so the first job is slower.
 """
 
+import os
+
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 from ..config import settings
 
 _MODEL = None  # lazily-loaded WhisperModel, shared across jobs in this worker
+
+
+def _cpu_threads() -> int:
+    """A sane per-worker thread cap so concurrent heavy workers don't oversubscribe
+    the CPU (CTranslate2's default of 0 grabs every core for each worker)."""
+    cores = os.cpu_count() or 4
+    return max(1, min(8, cores // 2))
 
 
 def _get_model():
@@ -22,8 +31,31 @@ def _get_model():
             settings.whisper_model,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute,
+            cpu_threads=_cpu_threads(),
+            num_workers=1,
         )
     return _MODEL
+
+
+def _resolve_language(language: str) -> str | None:
+    """Normalize the language param to a code (or None for auto); raise on invalid.
+
+    Validation is best-effort: if faster-whisper's code table isn't importable we
+    pass the value through and let the engine decide.
+    """
+    lang = language.strip().lower()
+    if lang in ("", "auto"):
+        return None
+    try:
+        from faster_whisper.tokenizer import _LANGUAGE_CODES as codes
+    except Exception:
+        codes = None
+    if codes and lang not in codes:
+        raise ToolError(
+            f"unsupported language code '{language}' — use a 2-letter ISO code such as "
+            f"en, de, fr, es, ar, zh, ru, ja, or 'auto' to detect it automatically"
+        )
+    return lang
 
 
 def _ts(seconds: float, sep: str) -> str:
@@ -68,23 +100,38 @@ class Transcribe(Tool):
     }
 
     def run(self, ctx: ToolContext) -> None:
-        language = str(ctx.params.get("language", "auto")).strip()
+        language = str(ctx.params.get("language", "auto"))
         output = str(ctx.params.get("output", "txt"))
+        lang = _resolve_language(language)  # validates; raises a clear ToolError
         model = _get_model()
         src = ctx.input_paths[0]
 
+        # float16 on GPU can afford a wide beam; on CPU a narrow beam is much faster.
+        beam_size = 5 if settings.whisper_device.lower().startswith("cuda") else 1
+
         ctx.progress(0.1, "loading model / decoding audio")
-        segments, info = model.transcribe(
-            str(src),
-            language=None if language in ("", "auto") else language,
-            vad_filter=True,
-        )
-        total = getattr(info, "duration", 0) or 0
-        segs = []
-        for seg in segments:  # generator — consumed lazily, so we can stream progress
-            segs.append(seg)
-            if total:
-                ctx.progress(min(0.95, (seg.end or 0) / total), "transcribing")
+        try:
+            segments, info = model.transcribe(
+                str(src),
+                language=lang,
+                vad_filter=True,
+                beam_size=beam_size,
+            )
+            total = getattr(info, "duration", 0) or 0
+            segs = []
+            for seg in segments:  # generator — consumed lazily, so we can stream progress
+                segs.append(seg)
+                if total:
+                    ctx.progress(min(0.95, (seg.end or 0) / total), "transcribing")
+        except ToolError:
+            raise
+        except Exception:
+            raise ToolError(
+                "could not decode the audio — the file may have no audio track or be corrupt"
+            ) from None
+
+        if not segs:
+            raise ToolError("no speech was detected in the recording")
 
         ctx.progress(0.97, f"writing {output}")
         out_path = ctx.output_dir / f"{src.stem}.{output}"

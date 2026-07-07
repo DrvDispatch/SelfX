@@ -6,6 +6,7 @@ Pillow build; if the running Pillow can't encode AVIF we raise a clear message.
 
 from PIL import Image
 
+from ._imaging import flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -84,18 +85,12 @@ class ImageConvert(Tool):
 
         src = ctx.input_paths[0]
         ctx.progress(0.2, "reading image")
-        try:
-            img = Image.open(src)
-            img.load()
-        except Exception:
-            raise ToolError("the file is not a readable image") from None
+        # load_image applies EXIF orientation and guards against decompression bombs
+        img = load_image(src)
 
-        # flatten alpha for formats that don't support it
-        if pil_fmt in ("JPEG", "BMP") and img.mode in ("RGBA", "LA", "P"):
-            background = Image.new("RGB", img.size, (255, 255, 255))
-            rgba = img.convert("RGBA")
-            background.paste(rgba, mask=rgba.split()[-1])
-            img = background
+        # flatten alpha onto white for formats that don't support it (no black JPEG)
+        if pil_fmt in ("JPEG", "BMP"):
+            img = flatten_rgb(img)
         elif img.mode == "P":
             img = img.convert("RGBA")
 

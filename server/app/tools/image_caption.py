@@ -1,14 +1,20 @@
 """image-caption: describe an image in words using a local vision model (Ollama)."""
 
 import base64
+from io import BytesIO
 
 import httpx
 
 from ..config import settings
+from ._imaging import downscale_max, flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
 _VISION_MODEL = "moondream"
+# moondream only needs a modest image; downscaling here cuts the base64 payload
+# (a large upload would otherwise become a multi-hundred-MB JSON body) and
+# sidesteps BMP/TIFF/GIF decode issues by always re-encoding to JPEG.
+_MAX_DIM = 1536
 
 
 @register
@@ -49,7 +55,13 @@ class ImageCaption(Tool):
     def run(self, ctx: ToolContext) -> None:
         prompt = str(ctx.params.get("prompt", "Describe this image in one or two sentences."))
         src = ctx.input_paths[0]
-        b64 = base64.b64encode(src.read_bytes()).decode("ascii")
+        # normalise + downscale to a small RGB JPEG before base64 (EXIF-correct,
+        # bomb-guarded, ~100x smaller payload than sending the raw upload)
+        img = flatten_rgb(downscale_max(load_image(src), _MAX_DIM))
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=90)
+        img.close()
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         ctx.progress(0.4, "describing image with local AI")
         try:
             r = httpx.post(

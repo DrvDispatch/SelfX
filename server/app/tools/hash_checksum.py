@@ -2,7 +2,7 @@
 
 import hashlib
 
-from .base import Tool, ToolContext
+from .base import Tool, ToolContext, ToolError
 from .registry import register
 
 _ALGOS = ["md5", "sha1", "sha256", "sha512"]
@@ -33,11 +33,24 @@ class HashChecksum(Tool):
     def run(self, ctx: ToolContext) -> None:
         choice = str(ctx.params.get("algorithm", "all"))
         algos = _ALGOS if choice == "all" else [choice]
-        hashers = {a: hashlib.new(a) for a in algos}
+        # hashlib.new() raises ValueError when an algorithm is disabled (e.g. md5
+        # under an OpenSSL FIPS build). Skip unavailable algorithms in 'all' mode;
+        # for a specific request, report it clearly instead of crashing the job.
+        hashers = {}
+        for a in algos:
+            try:
+                hashers[a] = hashlib.new(a)
+            except ValueError:
+                if choice != "all":
+                    raise ToolError(
+                        f"the {a} algorithm is not available on this server"
+                    ) from None
+        if not hashers:
+            raise ToolError("no supported hash algorithm is available on this server")
         src = ctx.input_paths[0]
         ctx.progress(0.3, "hashing")
         with src.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
                 for h in hashers.values():
                     h.update(chunk)
         lines = [f"{name}: {h.hexdigest()}" for name, h in hashers.items()]

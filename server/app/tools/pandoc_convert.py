@@ -4,6 +4,8 @@ Great for Markdown/HTML/DOCX/EPUB/LaTeX round-trips. PDF output needs a LaTeX en
 which this image does not ship, so PDF is redirected to the office-convert tool.
 """
 
+import shutil
+
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -40,6 +42,11 @@ class PandocConvert(Tool):
         "required": ["to"],
     }
 
+    def available(self) -> tuple[bool, str | None]:
+        if shutil.which("pandoc"):
+            return True, None
+        return False, "the markup-conversion engine (Pandoc) is not installed"
+
     def run(self, ctx: ToolContext) -> None:
         to = str(ctx.params.get("to", "html"))
         writer = _EXT.get(to)
@@ -53,7 +60,12 @@ class PandocConvert(Tool):
         src = ctx.input_paths[0]
         out_path = ctx.output_dir / f"{src.stem}.{to}"
         ctx.progress(0.3, f"converting to {to}")
-        ctx.run_cmd(["pandoc", str(src), "-o", str(out_path)])
-        if not out_path.is_file():
+        argv = ["pandoc", str(src), "-o", str(out_path)]
+        # A bare HTML fragment (no <head><meta charset>) mojibakes non-ASCII text;
+        # --standalone emits a complete, correctly-encoded document.
+        if to == "html":
+            argv.append("--standalone")
+        ctx.run_cmd(argv)
+        if not out_path.is_file() or out_path.stat().st_size == 0:
             raise ToolError("conversion produced no output")
         ctx.progress(1.0, "done")

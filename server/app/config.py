@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     # --- limits & retention ---
     max_upload_mb: int = 512
+    # Per-job ceiling on the total size of files a tool writes to output_dir.
+    # The worker sums output_dir after tool.run and fails the job if it exceeds this.
+    max_output_mb: int = 1024
     file_retention_hours: int = 24  # 0 = keep forever
     job_timeout_seconds: int = 1800
     rate_limit_per_minute: int = 60
@@ -24,6 +27,9 @@ class Settings(BaseSettings):
     gotenberg_url: str = "http://gotenberg:3000"
     ollama_url: str = "http://ollama:11434"
     ollama_model: str = "qwen3:8b"
+    # Context window (in tokens) passed to Ollama as options.num_ctx on chat/embed.
+    # Ollama's built-in default is only 2048, which silently left-truncates long prompts.
+    ollama_num_ctx: int = 8192
     # How long Ollama keeps a model in (V)RAM after a request. "0" unloads immediately;
     # a short idle like "30s"/"2m" stays warm for follow-ups then frees the GPU when idle.
     ollama_keep_alive: str = "30s"

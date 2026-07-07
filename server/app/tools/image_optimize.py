@@ -1,7 +1,6 @@
 """image-optimize: shrink an image's file size by re-encoding it efficiently (Pillow)."""
 
-from PIL import Image
-
+from ._imaging import flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -40,18 +39,17 @@ class ImageOptimize(Tool):
     def run(self, ctx: ToolContext) -> None:
         quality = int(ctx.params.get("quality", 75))
         src = ctx.input_paths[0]
-        try:
-            img = Image.open(src)
-            img.load()
-        except Exception:
-            raise ToolError("the file is not a readable image") from None
+        # load_image applies EXIF orientation and guards against decompression bombs
+        img = load_image(src)
 
         fmt = (img.format or "").upper()
         # normalise to a widely-supported output; keep the original extension where sensible
         if fmt in ("JPEG", "JPG", "MPO"):
             ext, save_fmt = "jpg", "JPEG"
-            if img.mode != "RGB":
-                img = img.convert("RGB")
+            # keep single-channel greyscale as L (RGB would triple the size); only
+            # normalise alpha / palette / CMYK to RGB, compositing onto white.
+            if img.mode not in ("RGB", "L"):
+                img = flatten_rgb(img)
             kw = {"quality": quality, "optimize": True, "progressive": True}
         elif fmt == "WEBP":
             ext, save_fmt, kw = "webp", "WEBP", {"quality": quality, "method": 6}
@@ -63,5 +61,18 @@ class ImageOptimize(Tool):
         img.close()
         before = src.stat().st_size
         after = out.stat().st_size
+
+        # Never hand back a bigger file than the input: if the re-encode didn't
+        # actually shrink it, return the original bytes unchanged instead.
+        if before and after >= before:
+            orig_ext = (src.suffix.lstrip(".").lower() or ext)
+            fallback = ctx.output_dir / f"{src.stem}-optimized.{orig_ext}"
+            fallback.write_bytes(src.read_bytes())
+            if fallback != out:
+                out.unlink(missing_ok=True)
+            after = fallback.stat().st_size
+            ctx.progress(1.0, f"already optimal: kept original ({before} bytes)")
+            return
+
         pct = int((1 - after / before) * 100) if before else 0
         ctx.progress(1.0, f"optimized: {before} -> {after} bytes ({pct}% smaller)")

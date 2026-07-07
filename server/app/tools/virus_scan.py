@@ -52,6 +52,14 @@ class VirusScan(Tool):
         ctx.progress(0.3, "scanning for malware")
         try:
             reply = _scan_stream(src, settings.clamav_host, settings.clamav_port)
+        except socket.timeout:
+            raise ToolError("the virus scan timed out") from None
+        except BrokenPipeError:
+            # clamd closes the connection mid-send when a file exceeds its
+            # StreamMaxLength — the daemon is fine, the file is just too big.
+            raise ToolError(
+                "the file exceeds the virus scanner's stream size limit"
+            ) from None
         except OSError:
             raise ToolError("could not reach the virus scanner") from None
 
@@ -61,6 +69,12 @@ class VirusScan(Tool):
         elif "FOUND" in reply:
             sig = reply.split(":", 1)[-1].replace("FOUND", "").strip()
             verdict = f"INFECTED — {sig}"
+        elif "size limit" in reply.lower():
+            raise ToolError("the file exceeds the virus scanner's stream size limit")
+        elif "ERROR" in reply.upper():
+            # A clamd error reply (e.g. "INSTREAM size limit exceeded. ERROR") is a
+            # scan FAILURE, not a result — don't record it as a successful verdict.
+            raise ToolError(f"the virus scanner reported an error: {reply}")
         else:
             verdict = reply or "unknown scan result"
         (ctx.output_dir / "scan-result.txt").write_text(

@@ -62,6 +62,21 @@ def get_owned_job(job_id: UUID, user: User, db: Session) -> Job:
     return job
 
 
+def _redact_params(params: dict | None) -> dict:
+    """Return a shallow copy with any value whose KEY contains 'password' replaced
+    by '***'. The redacted copy is what we persist in the jobs table (JSONB); the
+    real params are handed straight to the worker via the queue instead."""
+    if not params:
+        return {}
+    redacted: dict = {}
+    for key, value in params.items():
+        if isinstance(key, str) and "password" in key.lower():
+            redacted[key] = "***"
+        else:
+            redacted[key] = value
+    return redacted
+
+
 def _matched_extension(name: str, accepts: list[str]) -> str | None:
     lowered = name.lower()
     for ext in sorted(accepts, key=len, reverse=True):  # match ".tar.gz" before ".gz"
@@ -147,7 +162,15 @@ def create_job(
     except jsonschema.ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"invalid params: {exc.message}") from None
 
-    job = Job(user_id=user.id, tool=tool.slug, status="queued", params=payload.params)
+    # Persist a redacted copy (passwords -> '***') so PDF passwords and similar
+    # secrets never land in the jobs table in cleartext; the worker gets the real
+    # params directly off the queue (see enqueue_job / run_tool).
+    job = Job(
+        user_id=user.id,
+        tool=tool.slug,
+        status="queued",
+        params=_redact_params(payload.params),
+    )
     db.add(job)
     db.flush()
     for f in files:
@@ -155,7 +178,7 @@ def create_job(
     db.commit()
 
     try:
-        job.rq_job_id = enqueue_job(job.id, tool.queue)
+        job.rq_job_id = enqueue_job(job.id, tool.queue, payload.params)
         db.commit()
     except Exception:
         logger.exception("failed to enqueue job %s", job.id)

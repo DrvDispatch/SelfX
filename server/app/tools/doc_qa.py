@@ -9,6 +9,19 @@ from ._text_extract import extract_text
 from .base import Tool, ToolContext
 from .registry import register
 
+# Phrases a grounded model uses when the answer isn't in the provided text. Used only
+# to decide whether to suggest the RAG tool — never to alter the model's answer.
+_NOT_FOUND_HINTS = (
+    "not in the document", "not contain", "does not contain", "doesn't contain",
+    "cannot find", "can't find", "no information", "not mentioned", "not provided",
+    "isn't in", "is not in", "not found", "no mention", "not stated", "not specified",
+)
+
+
+def _looks_not_found(answer: str) -> bool:
+    low = answer.lower()
+    return any(h in low for h in _NOT_FOUND_HINTS)
+
 
 @register
 class DocQa(Tool):
@@ -55,7 +68,17 @@ class DocQa(Tool):
                 {"role": "user", "content": f"Document:\n{text}\n\nQuestion: {question}"},
             ]
         )
-        note = "\n\n[Note: the document was truncated to fit.]" if truncated else ""
+        notes = []
+        if truncated:
+            notes.append("only the first part of the document was searched")
+        # When the answer wasn't found (or the doc was truncated), nudge toward RAG,
+        # which searches the WHOLE document instead of only the stuffed prefix.
+        if truncated or _looks_not_found(answer):
+            notes.append(
+                "if the answer may be elsewhere in the document, try the 'Chat with documents "
+                "(RAG)' tool (multi-doc-qa), which searches the whole document"
+            )
+        note = ("\n\n[Note: " + "; ".join(notes) + ".]") if notes else ""
         out_path = ctx.output_dir / "answer.txt"
         out_path.write_text(f"Q: {question}\n\nA: {answer}{note}\n", encoding="utf-8")
         ctx.progress(1.0, "done")

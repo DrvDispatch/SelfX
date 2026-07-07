@@ -1,5 +1,9 @@
 """subtitle-extract: pull an embedded subtitle track out of a video into a .srt file."""
 
+import json
+import shutil
+
+from ._subtitles import IMAGE_SUB_CODECS, validate_has_cues
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -28,20 +32,64 @@ class SubtitleExtract(Tool):
         },
     }
 
+    def available(self) -> tuple[bool, str | None]:
+        if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+            return True, None
+        return False, "the subtitle engine (FFmpeg) is not installed"
+
+    def _probe_streams(self, ctx: ToolContext, src) -> list[dict] | None:
+        """Return the list of subtitle streams via ffprobe, or None if unknown."""
+        try:
+            proc = ctx.run_cmd([
+                "ffprobe", "-v", "error", "-select_streams", "s",
+                "-show_entries", "stream=index,codec_name,codec_type",
+                "-of", "json", str(src),
+            ])
+            data = json.loads(proc.stdout or "{}")
+            streams = data.get("streams")
+            return streams if isinstance(streams, list) else None
+        except Exception:
+            # ffprobe missing/odd output: don't block — fall through to ffmpeg.
+            return None
+
     def run(self, ctx: ToolContext) -> None:
         track = int(ctx.params.get("track", 0))
         src = ctx.input_paths[0]
         out = ctx.output_dir / f"{src.stem}.srt"
-        ctx.progress(0.4, "extracting subtitles")
+        ctx.progress(0.3, "inspecting subtitle tracks")
+
+        # Probe first so we can give an ACCURATE, actionable error instead of the
+        # old catch-all "no embedded subtitle track found" for every failure mode.
+        streams = self._probe_streams(ctx, src)
+        if streams is not None:
+            n = len(streams)
+            if n == 0:
+                raise ToolError("no subtitle tracks were found in this video")
+            if track >= n:
+                raise ToolError(
+                    f"track {track} does not exist — this video has "
+                    f"{n} subtitle track(s) (valid indexes 0..{n - 1})"
+                )
+            codec = str(streams[track].get("codec_name", "")).lower()
+            if codec in IMAGE_SUB_CODECS:
+                raise ToolError(
+                    f"subtitle track {track} is image-based ({codec}, e.g. PGS/VobSub/DVB) — "
+                    "it can't be extracted as text and would need OCR"
+                )
+
+        ctx.progress(0.5, "extracting subtitles")
         try:
             ctx.run_cmd([
-                "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src),
-                "-map", f"0:s:{track}", str(out),
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(src), "-map", f"0:s:{track}", str(out),
             ])
         except ToolError:
+            # If probing already validated the track, this is a real decode/mux
+            # failure rather than an absent track.
             raise ToolError(
-                "no embedded subtitle track found at that index — this video may have no subtitles"
+                f"could not extract subtitle track {track} — the track may be "
+                "corrupt or image-based (needs OCR)"
             ) from None
-        if not out.is_file() or out.stat().st_size == 0:
-            raise ToolError("no subtitles were extracted")
+        # Validate SEMANTIC output: >= 1 real cue, not just > 0 bytes.
+        validate_has_cues(out)
         ctx.progress(1.0, "done")
