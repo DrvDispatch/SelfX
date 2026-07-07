@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     clamav_host: str = "clamav"
     clamav_port: int = 3310
 
+    # --- knowledge base (persistent RAG on pgvector) ---
+    kb_embed_model: str = "nomic-embed-text"
+    kb_embed_dim: int = 768  # nomic-embed-text is 768-dim; changing model requires re-embed
+
+    # --- natural-language agent (drives the tool registry) ---
+    # Which brain routes NL -> tool calls. "ollama" = fully local/offline (default);
+    # "gemini" = cloud reasoning, only enabled once gemini_api_key is set.
+    selfx_agent_provider: str = "ollama"  # ollama | gemini
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_use_vertex: bool = False
+
     # --- dev convenience (SPEC §10 "non-debug mode") ---
     debug: bool = False
 

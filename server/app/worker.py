@@ -255,6 +255,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     init_db()
+    try:
+        from .kb.schema import ensure_schema as kb_ensure_schema
+
+        kb_ensure_schema()
+    except Exception:
+        logger.exception("kb schema setup failed in worker")
     ensure_dirs()
     connection = Redis.from_url(settings.redis_url)
     queues = [Queue(name, connection=connection) for name in ("default", "heavy")]

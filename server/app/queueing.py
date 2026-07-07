@@ -49,6 +49,20 @@ def enqueue_job(
     return rq_job.id
 
 
+def enqueue_kb_ingest(document_id: uuid.UUID | str) -> str:
+    """Enqueue knowledge-base ingestion of one document on the heavy queue."""
+    rq_job = get_queue("heavy").enqueue(
+        "app.kb.ingest.ingest_document",
+        str(document_id),
+        job_timeout=settings.job_timeout_seconds,
+        result_ttl=600,
+        failure_ttl=86400,
+        description=f"kb ingest {document_id}",
+    )
+    logger.info("kb document %s ingest enqueued (rq id %s)", document_id, rq_job.id)
+    return rq_job.id
+
+
 def cancel_rq_job(rq_job_id: str) -> None:
     """Best-effort cancel of a queued RQ job."""
     try:
