@@ -224,3 +224,89 @@ export function adminDeleteUser(id: string): Promise<void> {
 export function adminListJobs(limit = 50, offset = 0): Promise<JobList> {
   return request<JobList>(`/admin/jobs?limit=${limit}&offset=${offset}`);
 }
+
+// --- knowledge base ---
+
+export interface KbCollection {
+  id: string;
+  name: string;
+  embed_model: string;
+  allow_cloud: boolean;
+  documents: number;
+  chunks: number;
+}
+export interface KbDocument {
+  id: string;
+  orig_name: string;
+  status: string;
+  n_chunks: number;
+  error: string | null;
+}
+export interface Citation {
+  n: number;
+  document: string;
+  ordinal: number;
+  snippet: string;
+}
+export interface KbChatResponse {
+  answer: string;
+  citations: Citation[];
+  sources: string[];
+}
+export interface KbMessage {
+  role: string;
+  content: string;
+  citations: Citation[];
+}
+
+export function kbListCollections(): Promise<KbCollection[]> {
+  return request<KbCollection[]>("/kb/collections");
+}
+export function kbCreateCollection(name: string): Promise<KbCollection> {
+  return request<KbCollection>("/kb/collections", jsonInit("POST", { name }));
+}
+export function kbDeleteCollection(id: string): Promise<void> {
+  return request<void>(`/kb/collections/${id}`, { method: "DELETE" });
+}
+export function kbListDocuments(id: string): Promise<KbDocument[]> {
+  return request<KbDocument[]>(`/kb/collections/${id}/documents`);
+}
+export function kbAddDocuments(id: string, fileIds: string[]): Promise<KbDocument[]> {
+  return request<KbDocument[]>(`/kb/collections/${id}/documents`, jsonInit("POST", { file_ids: fileIds }));
+}
+export function kbChat(id: string, question: string): Promise<KbChatResponse> {
+  return request<KbChatResponse>(`/kb/collections/${id}/chat`, jsonInit("POST", { question }));
+}
+export function kbMessages(id: string): Promise<KbMessage[]> {
+  return request<KbMessage[]>(`/kb/collections/${id}/messages`);
+}
+
+// --- agent ---
+
+export interface AgentStep {
+  tool: string;
+  args: Record<string, unknown>;
+  result: {
+    ok?: boolean;
+    status?: string;
+    error?: string;
+    outputs?: { id: string; name: string; size: number }[];
+  } & Record<string, unknown>;
+}
+export interface AgentReply {
+  answer: string;
+  steps: AgentStep[];
+  provider: string;
+}
+export interface AgentStatus {
+  default_provider: string;
+  gemini_available: boolean;
+  local_model: string;
+  gemini_model: string;
+}
+export function agentStatus(): Promise<AgentStatus> {
+  return request<AgentStatus>("/agent/status");
+}
+export function agentChat(message: string, fileIds: string[], provider?: string): Promise<AgentReply> {
+  return request<AgentReply>("/agent/chat", jsonInit("POST", { message, file_ids: fileIds, provider }));
+}

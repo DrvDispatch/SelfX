@@ -3,8 +3,10 @@ import { AuthProvider, RequireAdmin, RequireAuth } from "./auth";
 import { ThemeProvider } from "./theme";
 import Layout from "./components/Layout";
 import Admin from "./pages/Admin";
+import Agent from "./pages/Agent";
 import Dashboard from "./pages/Dashboard";
 import Jobs from "./pages/Jobs";
+import KnowledgeBase from "./pages/KnowledgeBase";
 import Login from "./pages/Login";
 import QuickTools from "./pages/QuickTools";
 import ToolPage from "./pages/ToolPage";
@@ -24,6 +26,8 @@ export default function App() {
               }
             >
               <Route path="/" element={<Dashboard />} />
+              <Route path="/assistant" element={<Agent />} />
+              <Route path="/knowledge" element={<KnowledgeBase />} />
               <Route path="/tool/:slug" element={<ToolPage />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/quick-tools" element={<QuickTools />} />

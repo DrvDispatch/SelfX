@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Boxes, LayoutGrid, ListChecks, LogOut, Moon, Shield, Sun } from "lucide-react";
+import { BookOpen, Boxes, LayoutGrid, ListChecks, LogOut, Moon, Shield, Sparkles, Sun } from "lucide-react";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
 
@@ -36,6 +36,12 @@ export default function Layout() {
           <nav className="ml-3 hidden items-center gap-1 sm:flex">
             <NavLink to="/" end className={navClass}>
               <LayoutGrid className="h-4 w-4" /> Tools
+            </NavLink>
+            <NavLink to="/assistant" className={navClass}>
+              <Sparkles className="h-4 w-4" /> Assistant
+            </NavLink>
+            <NavLink to="/knowledge" className={navClass}>
+              <BookOpen className="h-4 w-4" /> Knowledge
             </NavLink>
             <NavLink to="/jobs" className={navClass}>
               <ListChecks className="h-4 w-4" /> Jobs
