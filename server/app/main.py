@@ -22,6 +22,7 @@ from .models import User
 from .queueing import redis_conn
 from .ratelimit import limiter
 from .routes import admin as admin_routes
+from .routes import agent as agent_routes
 from .routes import auth as auth_routes
 from .routes import files as files_routes
 from .routes import jobs as jobs_routes
@@ -114,6 +115,7 @@ app.include_router(files_routes.router, prefix=API_PREFIX)
 app.include_router(jobs_routes.router, prefix=API_PREFIX)
 app.include_router(admin_routes.router, prefix=API_PREFIX)
 app.include_router(kb_routes.router, prefix=API_PREFIX)
+app.include_router(agent_routes.router, prefix=API_PREFIX)
 
 
 @app.get(API_PREFIX + "/healthz")

@@ -16,6 +16,7 @@ from ..models import File, Job, User, utcnow
 from ..queueing import cancel_rq_job, enqueue_job
 from ..ratelimit import RATE_LIMIT, limiter
 from ..schemas import FileInfo, JobCreate, JobList, JobOut
+from ..services.jobs import create_and_run_job
 from ..tools.base import Tool
 from ..tools.registry import get_tool
 
@@ -144,52 +145,8 @@ def create_job(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JobOut:
-    tool = get_tool(payload.tool)
-    if tool is None:
-        raise HTTPException(status_code=404, detail=f"unknown tool '{payload.tool}'")
-    try:
-        available, reason = tool.available()
-    except Exception:
-        logger.exception("availability check failed for tool '%s'", tool.slug)
-        available, reason = False, "availability check failed"
-    if not available:
-        raise HTTPException(status_code=409, detail=f"tool unavailable: {reason or 'unknown'}")
-
-    files = _validate_files(payload, tool, user, db)
-
-    try:
-        jsonschema.validate(instance=payload.params, schema=tool.params_schema)
-    except jsonschema.ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"invalid params: {exc.message}") from None
-
-    # Persist a redacted copy (passwords -> '***') so PDF passwords and similar
-    # secrets never land in the jobs table in cleartext; the worker gets the real
-    # params directly off the queue (see enqueue_job / run_tool).
-    job = Job(
-        user_id=user.id,
-        tool=tool.slug,
-        status="queued",
-        params=_redact_params(payload.params),
-    )
-    db.add(job)
-    db.flush()
-    for f in files:
-        f.job_id = job.id
-    db.commit()
-
-    try:
-        job.rq_job_id = enqueue_job(job.id, tool.queue, payload.params)
-        db.commit()
-    except Exception:
-        logger.exception("failed to enqueue job %s", job.id)
-        job.status = "error"
-        job.error = "job queue unavailable — please retry later"
-        job.finished_at = utcnow()
-        db.commit()
-        raise HTTPException(status_code=503, detail="job queue unavailable") from None
-
-    logger.info("job %s created by %s (tool=%s, queue=%s)", job.id, user.username, tool.slug, tool.queue)
-    db.refresh(job)
+    # single validated choke-point shared with the NL agent
+    job = create_and_run_job(db, user, payload.tool, payload.file_ids, payload.params)
     return job_to_schema(job)
 
 
