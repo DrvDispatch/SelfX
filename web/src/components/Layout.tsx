@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { BookOpen, Boxes, LayoutGrid, ListChecks, LogOut, Moon, Shield, Sparkles, Sun } from "lucide-react";
+import { BookOpen, Boxes, LayoutGrid, ListChecks, LogOut, Moon, Search, Shield, Sparkles, Sun } from "lucide-react";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
+import CommandPalette from "./CommandPalette";
 
 function navClass({ isActive }: { isActive: boolean }): string {
   return [
@@ -16,6 +18,18 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const { resolved, toggle } = useTheme();
   const navigate = useNavigate();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const onLogout = () => {
     logout();
@@ -60,6 +74,17 @@ export default function Layout() {
 
           <button
             type="button"
+            onClick={() => setPaletteOpen(true)}
+            title="Search (⌘K)"
+            className="hidden items-center gap-2 rounded-full bg-surface-2 py-1.5 pl-3 pr-1.5 text-sm text-muted transition-colors hover:text-fg sm:flex"
+          >
+            <Search className="h-4 w-4" />
+            <span className="text-faint">Search</span>
+            <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-faint">⌘K</kbd>
+          </button>
+
+          <button
+            type="button"
             onClick={toggle}
             title={resolved === "dark" ? "Switch to light" : "Switch to dark"}
             className="grid h-9 w-9 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-fg"
@@ -91,6 +116,8 @@ export default function Layout() {
       <main className="animate-in mx-auto max-w-6xl px-4 py-6 sm:py-8">
         <Outlet />
       </main>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }
