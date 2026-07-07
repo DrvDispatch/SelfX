@@ -1,0 +1,25 @@
+# GPU override: NVIDIA device reservations for worker + ollama.
+# Requires the NVIDIA Container Toolkit on the host.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile ai up -d --build
+
+services:
+  worker:
+    environment:
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE: float16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

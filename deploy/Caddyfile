@@ -1,0 +1,16 @@
+# SelfX VPS TLS proxy (compose profile: proxy).
+# SELFX_DOMAIN comes from .env via the caddy service environment.
+# Caddy provisions Let's Encrypt certificates automatically for real domains.
+
+{$SELFX_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy web:80
+}

@@ -1,0 +1,38 @@
+# secrets / environment
+.env
+.env.*
+!.env.example
+
+# runtime data
+data/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# node
+node_modules/
+web/dist/
+npm-debug.log*
+
+# local compose override (dev port mappings etc.)
+docker-compose.override.yml
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# claude code session state
+.claude/
+transcripts/

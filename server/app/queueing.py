@@ -1,0 +1,54 @@
+"""RQ queues and job enqueueing (SPEC §1, §6)."""
+
+import logging
+import uuid
+
+from redis import Redis
+from rq import Queue
+
+from .config import settings
+
+logger = logging.getLogger("selfx.queueing")
+
+QUEUE_NAMES = ("default", "heavy")
+
+redis_conn = Redis.from_url(settings.redis_url)
+
+_queues: dict[str, Queue] = {}
+
+
+def get_queue(name: str = "default") -> Queue:
+    if name not in QUEUE_NAMES:
+        name = "default"
+    if name not in _queues:
+        _queues[name] = Queue(name, connection=redis_conn)
+    return _queues[name]
+
+
+def enqueue_job(job_id: uuid.UUID | str, queue_name: str = "default") -> str:
+    """Enqueue app.worker.run_tool(job_id) on the given queue; returns the RQ job id."""
+    queue = get_queue(queue_name)
+    rq_job = queue.enqueue(
+        "app.worker.run_tool",
+        str(job_id),
+        job_timeout=settings.job_timeout_seconds,
+        result_ttl=3600,
+        failure_ttl=86400,
+        description=f"selfx job {job_id}",
+    )
+    logger.info("job %s enqueued on '%s' (rq id %s)", job_id, queue.name, rq_job.id)
+    return rq_job.id
+
+
+def cancel_rq_job(rq_job_id: str) -> None:
+    """Best-effort cancel of a queued RQ job."""
+    try:
+        from rq.job import Job as RQJob
+
+        RQJob.fetch(rq_job_id, connection=redis_conn).cancel()
+    except Exception:
+        logger.warning("could not cancel rq job %s (may have already started)", rq_job_id)
+
+
+def queue_depths() -> dict[str, int]:
+    return {name: get_queue(name).count for name in QUEUE_NAMES}

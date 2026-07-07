@@ -1,0 +1,156 @@
+# SelfX — core stack + optional profiles (ai, extras, security, proxy).
+# Copy .env.example → .env and adjust secrets before `docker compose up -d --build`.
+
+name: selfx
+
+# Shared env for api + worker (single source, values come from .env).
+x-server-env: &server-env
+  SELFX_SECRET_KEY: ${SELFX_SECRET_KEY:?Set SELFX_SECRET_KEY in .env}
+  SELFX_ADMIN_USER: ${SELFX_ADMIN_USER:-admin}
+  SELFX_ADMIN_PASSWORD: ${SELFX_ADMIN_PASSWORD:-change-me}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://selfx:selfx@db:5432/selfx}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  DATA_DIR: ${DATA_DIR:-/data}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-512}
+  FILE_RETENTION_HOURS: ${FILE_RETENTION_HOURS:-24}
+  JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-1800}
+  RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+  GOTENBERG_URL: ${GOTENBERG_URL:-http://gotenberg:3000}
+  OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+  WHISPER_MODEL: ${WHISPER_MODEL:-small}
+  WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+  WHISPER_COMPUTE: ${WHISPER_COMPUTE:-int8}
+  CLAMAV_ENABLED: ${CLAMAV_ENABLED:-false}
+  CLAMAV_HOST: ${CLAMAV_HOST:-clamav}
+  CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+
+services:
+  web:
+    build: ./web
+    image: selfx-web
+    restart: unless-stopped
+    ports:
+      - "8080:80" # the ONLY published port of the core stack
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    build: ./server
+    image: selfx-server
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *server-env
+    volumes:
+      - selfx_data:/data
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/healthz', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build: ./server # same image as api; compose builds it once
+    image: selfx-server
+    restart: unless-stopped
+    command: python -m app.worker
+    environment: *server-env
+    volumes:
+      - selfx_data:/data
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${WORKER_MEM_LIMIT:-6g}
+    shm_size: 1g
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-selfx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-selfx}
+      POSTGRES_DB: ${POSTGRES_DB:-selfx}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    profiles: [ai]
+    volumes:
+      - ollama:/root/.ollama
+
+  stirling:
+    image: stirlingtools/stirling-pdf:latest
+    restart: unless-stopped
+    profiles: [extras]
+    ports:
+      - "8081:8080"
+
+  clamav:
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    profiles: [security]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    profiles: [proxy]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      SELFX_DOMAIN: ${SELFX_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  pgdata:
+  selfx_data:
+  ollama:
+  caddy_data: # Let's Encrypt certificates survive restarts
+  caddy_config:
