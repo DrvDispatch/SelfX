@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Cpu, Loader2, Paperclip, Send, Sparkles, User, Wrench, X } from "lucide-react";
+import { Bot, Cpu, Eye, Loader2, Paperclip, Send, Sparkles, User, Wrench, X } from "lucide-react";
 import {
   agentChat,
   agentStatus,
-  downloadFile,
   uploadFile,
   type AgentStatus,
   type AgentStep,
 } from "../api";
+import FilePreview, { type PreviewFile } from "../components/FilePreview";
 import { formatBytes } from "../format";
 
 interface Turn {
@@ -17,6 +17,7 @@ interface Turn {
 }
 
 function StepCard({ step }: { step: AgentStep }) {
+  const [preview, setPreview] = useState<PreviewFile | null>(null);
   const outs = step.result?.outputs ?? [];
   const ok = step.result?.ok !== false && step.result?.error === undefined;
   return (
@@ -34,14 +35,15 @@ function StepCard({ step }: { step: AgentStep }) {
           {outs.map((o) => (
             <button
               key={o.id}
-              onClick={() => void downloadFile({ id: o.id, orig_name: o.name })}
-              className="rounded-full bg-surface px-2.5 py-1 text-xs text-primary hover:bg-line"
+              onClick={() => setPreview({ id: o.id, orig_name: o.name, mime: "" })}
+              className="flex items-center gap-1 rounded-full bg-surface px-2.5 py-1 text-xs text-primary hover:bg-line"
             >
-              ↓ {o.name} <span className="text-faint">({formatBytes(o.size)})</span>
+              <Eye className="h-3.5 w-3.5" /> {o.name} <span className="text-faint">({formatBytes(o.size)})</span>
             </button>
           ))}
         </div>
       )}
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }

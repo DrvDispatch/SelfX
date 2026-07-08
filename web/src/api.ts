@@ -128,6 +128,20 @@ export function uploadFile(file: File): Promise<FileInfo> {
   return request<FileInfo>("/files", { method: "POST", body: form });
 }
 
+/** Fetches a file's bytes with the auth header (for inline previews). */
+export async function fetchFileBlob(id: string): Promise<Blob> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(`${BASE}/files/${id}/download`, { headers });
+  if (res.status === 401) {
+    handleUnauthorized();
+    throw new ApiError(401, "Session expired");
+  }
+  if (!res.ok) throw new ApiError(res.status, await errorDetail(res));
+  return res.blob();
+}
+
 /** Fetches a file with the auth header and triggers a browser download. */
 export async function downloadFile(file: {
   id: string;

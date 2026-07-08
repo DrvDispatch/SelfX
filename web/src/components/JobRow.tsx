@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Download, Trash2, XCircle } from "lucide-react";
-import { downloadFile, ApiError } from "../api";
-import { formatDate, formatDuration } from "../format";
+import { Eye, Trash2, XCircle } from "lucide-react";
 import type { Job } from "../types";
+import { formatDate, formatDuration } from "../format";
+import FilePreview from "./FilePreview";
 import StatusBadge from "./StatusBadge";
 
 interface Props {
@@ -13,18 +13,9 @@ interface Props {
 }
 
 export default function JobRow({ job, highlighted, onCancel, onDelete }: Props) {
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Job["output_files"][number] | null>(null);
   const active = job.status === "queued" || job.status === "running";
   const pct = Math.round(Math.min(1, Math.max(0, job.progress)) * 100);
-
-  const handleDownload = async (file: Job["output_files"][number]) => {
-    setDownloadError(null);
-    try {
-      await downloadFile(file);
-    } catch (e) {
-      setDownloadError(e instanceof ApiError ? e.detail : "Download failed");
-    }
-  };
 
   return (
     <tr
@@ -85,11 +76,11 @@ export default function JobRow({ job, highlighted, onCancel, onDelete }: Props) 
             <button
               key={f.id}
               type="button"
-              onClick={() => void handleDownload(f)}
-              title={`Download ${f.orig_name}`}
+              onClick={() => setPreview(f)}
+              title={`Preview ${f.orig_name}`}
               className="flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-line"
             >
-              <Download className="h-3.5 w-3.5" />
+              <Eye className="h-3.5 w-3.5" />
               <span className="max-w-36 truncate">{f.orig_name}</span>
             </button>
           ))}
@@ -113,9 +104,7 @@ export default function JobRow({ job, highlighted, onCancel, onDelete }: Props) 
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
-        {downloadError && (
-          <p className="mt-1 text-xs text-danger">{downloadError}</p>
-        )}
+        {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
       </td>
     </tr>
   );
