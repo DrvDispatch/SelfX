@@ -25,6 +25,10 @@ def main() -> int:
     ap.add_argument("--hf-token", default="")
     ap.add_argument("--batch-size", type=int, default=16)
     args = ap.parse_args()
+    # Token: prefer the inherited env (the worker sources selfx.env) over argv so it
+    # never shows up in `ps`; fall back to --hf-token for standalone use.
+    import os
+    hf_token = os.environ.get("HUGGINGFACE_TOKEN", "") or args.hf_token
 
     import torch
     import whisperx
@@ -54,17 +58,25 @@ def main() -> int:
         print(f"align skipped: {exc}", file=sys.stderr)
 
     # optional speaker diarization (needs a HuggingFace token for pyannote)
-    if args.diarize and args.hf_token:
+    if args.diarize and hf_token:
         try:
             try:
                 from whisperx.diarize import DiarizationPipeline, assign_word_speakers
             except Exception:
                 from whisperx import DiarizationPipeline, assign_word_speakers
-            diarize = DiarizationPipeline(use_auth_token=args.hf_token, device=device)
+            try:
+                diarize = DiarizationPipeline(token=hf_token, device=device)
+            except TypeError:
+                # older WhisperX used use_auth_token=
+                diarize = DiarizationPipeline(use_auth_token=hf_token, device=device)
             diarize_segments = diarize(audio)
-            aligned = assign_word_speakers(diarize_segments, aligned)
+            n_turns = len(diarize_segments) if diarize_segments is not None else 0
+            aligned = assign_word_speakers(diarize_segments, aligned, fill_nearest=True)
+            n_labeled = sum(1 for s in aligned.get("segments", []) if s.get("speaker"))
+            print(f"diarization: {n_turns} turns, {n_labeled} segments labeled", file=sys.stderr)
         except Exception as exc:
-            print(f"diarization skipped: {exc}", file=sys.stderr)
+            import traceback
+            print(f"diarization skipped: {exc}\n{traceback.format_exc()}", file=sys.stderr)
 
     out_segments = []
     for s in aligned.get("segments", []):

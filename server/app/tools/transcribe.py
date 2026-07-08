@@ -295,13 +295,14 @@ class Transcribe(Tool):
                 "--language", lang or "auto", "--task", task,
                 "--out", str(out_json), "--batch-size", "16"]
         if diarize:
-            token = settings.huggingface_token
-            if not token:
+            if not settings.huggingface_token:
                 raise ToolError(
                     "speaker labels need a HuggingFace token — set HUGGINGFACE_TOKEN "
                     "(and accept the pyannote model terms), or turn off diarization"
                 )
-            argv += ["--diarize", "--hf-token", token]
+            # The token is inherited from the worker's env by the subprocess (the runner
+            # reads HUGGINGFACE_TOKEN) so it never appears in the process args.
+            argv += ["--diarize"]
         ctx.progress(0.2, "transcribing with WhisperX (word alignment)")
         ctx.run_cmd(argv)  # raises ToolError with stderr tail on failure
         try:
