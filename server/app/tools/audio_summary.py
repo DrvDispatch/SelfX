@@ -69,7 +69,7 @@ class AudioSummary(Tool):
         lang = _resolve_language(language)  # validates; raises a clear ToolError
         src = ctx.input_paths[0]
         ctx.progress(0.15, "transcribing audio")
-        model = _get_model()
+        model = _get_model("large-v3-turbo")
         segments, info = model.transcribe(str(src), language=lang, vad_filter=True)
         segs = list(segments)
         transcript = " ".join(s.text.strip() for s in segs).strip()

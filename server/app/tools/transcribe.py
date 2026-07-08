@@ -11,7 +11,11 @@ from .base import Tool, ToolContext, ToolError
 from .registry import register
 from ..config import settings
 
-_MODEL = None  # lazily-loaded WhisperModel, shared across jobs in this worker
+_MODELS: dict[str, object] = {}  # WhisperModel cache keyed by model name (per worker)
+
+# Whisper sizes the UI offers. large-v3-turbo is the sweet spot on a GPU: near
+# large-v3 accuracy at a fraction of the cost. Any faster-whisper model id also works.
+_WHISPER_MODELS = ["large-v3-turbo", "large-v3", "medium", "small", "base", "tiny"]
 
 
 def _cpu_threads() -> int:
@@ -21,21 +25,25 @@ def _cpu_threads() -> int:
     return max(1, min(8, cores // 2))
 
 
-def _get_model():
-    global _MODEL
-    if _MODEL is None:
+def _get_model(model_name: str):
+    model = _MODELS.get(model_name)
+    if model is None:
         try:
             from faster_whisper import WhisperModel
         except Exception:
             raise ToolError("the transcription engine is not available on this server") from None
-        _MODEL = WhisperModel(
-            settings.whisper_model,
-            device=settings.whisper_device,
-            compute_type=settings.whisper_compute,
-            cpu_threads=_cpu_threads(),
-            num_workers=1,
-        )
-    return _MODEL
+        try:
+            model = WhisperModel(
+                model_name,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute,
+                cpu_threads=_cpu_threads(),
+                num_workers=1,
+            )
+        except Exception:
+            raise ToolError(f"could not load the '{model_name}' transcription model") from None
+        _MODELS[model_name] = model
+    return model
 
 
 def _resolve_language(language: str) -> str | None:
@@ -84,6 +92,28 @@ class Transcribe(Tool):
     params_schema = {
         "type": "object",
         "properties": {
+            "engine": {
+                "type": "string",
+                "title": "Engine",
+                "description": "faster-whisper = fast, built in (default). whisperx = word-level "
+                               "alignment + optional speaker diarization (runs in its own env).",
+                "enum": ["faster-whisper", "whisperx"],
+                "default": "faster-whisper",
+            },
+            "diarize": {
+                "type": "boolean",
+                "title": "Label speakers (WhisperX)",
+                "description": "Tag who spoke each line. Needs the whisperx engine + a HuggingFace token.",
+                "default": False,
+            },
+            "model": {
+                "type": "string",
+                "title": "Model",
+                "description": "large-v3-turbo = best accuracy/speed on a GPU (default); "
+                               "smaller = faster / less VRAM.",
+                "enum": _WHISPER_MODELS,
+                "default": "large-v3-turbo",
+            },
             "language": {
                 "type": "string",
                 "title": "Language",
@@ -143,6 +173,8 @@ class Transcribe(Tool):
         word_timestamps = bool(ctx.params.get("word_timestamps", False))
         condition_prev = bool(ctx.params.get("condition_on_previous_text", True))
         initial_prompt = str(ctx.params.get("initial_prompt", "")).strip() or None
+        engine = str(ctx.params.get("engine", "faster-whisper")).lower()
+        diarize = bool(ctx.params.get("diarize", False))
         lang = _resolve_language(language)  # validates; raises a clear ToolError
 
         src = ctx.input_paths[0]
@@ -154,49 +186,17 @@ class Transcribe(Tool):
                 and not info_probe["audio"]:
             raise ToolError("this file has no audio track to transcribe")
 
-        model = _get_model()
+        model_name = str(ctx.params.get("model") or "").strip() or settings.whisper_model
+        if model_name not in _WHISPER_MODELS and "/" not in model_name:
+            model_name = "large-v3-turbo"
 
-        # float16 on GPU can afford a wide beam; on CPU a narrow beam is much faster.
-        # beam_size=0 keeps this device-aware default; a positive value overrides it.
-        beam_override = ctx.params.get("beam_size", 0)
-        try:
-            beam_override = int(beam_override)
-        except (TypeError, ValueError):
-            beam_override = 0
-        if beam_override > 0:
-            beam_size = max(1, min(10, beam_override))
+        if engine == "whisperx":
+            segs, lang_out, total = self._run_whisperx(ctx, src, model_name, lang, task, diarize)
+            word_timestamps = True  # WhisperX always aligns words
         else:
-            beam_size = 5 if settings.whisper_device.lower().startswith("cuda") else 1
-
-        ctx.progress(0.1, "loading model / decoding audio")
-        try:
-            segments, info = model.transcribe(
-                str(src),
-                language=lang,
-                task=task,
-                vad_filter=True,
-                beam_size=beam_size,
-                word_timestamps=word_timestamps,
-                condition_on_previous_text=condition_prev,
-                initial_prompt=initial_prompt,
+            segs, lang_out, total = self._run_faster_whisper(
+                ctx, src, model_name, lang, task, word_timestamps, condition_prev, initial_prompt
             )
-            total = getattr(info, "duration", 0) or 0
-            segs = []
-            for seg in segments:  # generator — consumed lazily, so we can stream progress
-                segs.append(seg)
-                if total:
-                    ctx.progress(min(0.95, (seg.end or 0) / total), "transcribing")
-                else:
-                    # Some containers report no duration; fall back to a creeping
-                    # indeterminate bar so progress doesn't freeze at 0.1.
-                    ctx.progress(min(0.9, 0.1 + 0.02 * len(segs)), "transcribing")
-        except ToolError:
-            raise
-        except Exception:
-            raise ToolError(
-                "could not decode the audio — the file may have no audio track or be corrupt"
-            ) from None
-
         if not segs:
             raise ToolError("no speech was detected in the recording")
 
@@ -218,7 +218,7 @@ class Transcribe(Tool):
                 return d
 
             data = {
-                "language": getattr(info, "language", None),
+                "language": lang_out,
                 "duration": total,
                 "segments": [_seg_dict(s) for s in segs],
             }
@@ -238,3 +238,87 @@ class Transcribe(Tool):
         else:
             raise ToolError(f"unsupported output format '{output}'")
         ctx.progress(1.0, "done")
+
+    def _run_faster_whisper(self, ctx, src, model_name, lang, task,
+                            word_timestamps, condition_prev, initial_prompt):
+        """Built-in engine (main venv). Returns (segs, language, total_seconds)."""
+        model = _get_model(model_name)
+        beam_override = ctx.params.get("beam_size", 0)
+        try:
+            beam_override = int(beam_override)
+        except (TypeError, ValueError):
+            beam_override = 0
+        if beam_override > 0:
+            beam_size = max(1, min(10, beam_override))
+        else:
+            beam_size = 5 if settings.whisper_device.lower().startswith("cuda") else 1
+
+        ctx.progress(0.1, "loading model / decoding audio")
+        try:
+            segments, info = model.transcribe(
+                str(src), language=lang, task=task, vad_filter=True, beam_size=beam_size,
+                word_timestamps=word_timestamps, condition_on_previous_text=condition_prev,
+                initial_prompt=initial_prompt,
+            )
+            total = getattr(info, "duration", 0) or 0
+            segs = []
+            for seg in segments:
+                segs.append(seg)
+                if total:
+                    ctx.progress(min(0.95, (seg.end or 0) / total), "transcribing")
+                else:
+                    ctx.progress(min(0.9, 0.1 + 0.02 * len(segs)), "transcribing")
+        except ToolError:
+            raise
+        except Exception:
+            raise ToolError(
+                "could not decode the audio — the file may have no audio track or be corrupt"
+            ) from None
+        return segs, getattr(info, "language", None), total
+
+    def _run_whisperx(self, ctx, src, model_name, lang, task, diarize):
+        """WhisperX in its ISOLATED venv (own torch) via subprocess. Returns
+        (segs, language, total_seconds) with word alignment (+ speakers if diarized)."""
+        import json as _json
+        import os
+        from types import SimpleNamespace
+
+        py = settings.whisperx_python
+        runner = os.path.join(os.path.dirname(__file__), "_whisperx_run.py")
+        if not os.path.isfile(py):
+            raise ToolError("WhisperX is not installed on this server")
+        # WhisperX loads faster-whisper sizes; map unknowns to large-v3.
+        wx_models = {"large-v3", "large-v2", "large-v3-turbo", "medium", "small", "base", "tiny"}
+        wx_model = model_name if model_name in wx_models else "large-v3"
+        out_json = ctx.workdir / "whisperx.json"
+        argv = [py, runner, "--audio", str(src), "--model", wx_model,
+                "--language", lang or "auto", "--task", task,
+                "--out", str(out_json), "--batch-size", "16"]
+        if diarize:
+            token = settings.huggingface_token
+            if not token:
+                raise ToolError(
+                    "speaker labels need a HuggingFace token — set HUGGINGFACE_TOKEN "
+                    "(and accept the pyannote model terms), or turn off diarization"
+                )
+            argv += ["--diarize", "--hf-token", token]
+        ctx.progress(0.2, "transcribing with WhisperX (word alignment)")
+        ctx.run_cmd(argv)  # raises ToolError with stderr tail on failure
+        try:
+            data = _json.loads(out_json.read_text("utf-8"))
+        except Exception:
+            raise ToolError("WhisperX produced no readable output") from None
+        segs = []
+        for s in data.get("segments", []):
+            text = (s.get("text") or "").strip()
+            if s.get("speaker"):
+                text = f"[{s['speaker']}] {text}"
+            words = [
+                SimpleNamespace(word=w.get("word"), start=w.get("start"), end=w.get("end"))
+                for w in (s.get("words") or [])
+                if w.get("start") is not None
+            ] or None
+            segs.append(SimpleNamespace(start=s.get("start") or 0, end=s.get("end") or 0,
+                                        text=text, words=words))
+        total = segs[-1].end if segs else 0
+        return segs, data.get("language"), total

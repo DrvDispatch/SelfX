@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute: str = "int8"
+    # WhisperX runs in its OWN venv (its own torch) so it can't disturb the main
+    # env; transcribe shells out to this interpreter. HF token enables diarization.
+    whisperx_python: str = "/root/whisperx-venv/bin/python"
+    huggingface_token: str = ""
     clamav_enabled: bool = False
     clamav_host: str = "clamav"
     clamav_port: int = 3310

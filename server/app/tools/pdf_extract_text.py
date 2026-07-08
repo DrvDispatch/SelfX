@@ -20,6 +20,14 @@ class PdfExtractText(Tool):
     params_schema = {
         "type": "object",
         "properties": {
+            "engine": {
+                "type": "string",
+                "title": "Engine",
+                "description": "pymupdf = faster, better reading order (default); "
+                               "pypdf = pure-Python fallback.",
+                "enum": ["pymupdf", "pypdf"],
+                "default": "pymupdf",
+            },
             "mode": {
                 "type": "string",
                 "title": "Extraction mode",
@@ -50,8 +58,59 @@ class PdfExtractText(Tool):
             mode = "plain"
         spec = str(ctx.params.get("pages", "")).strip()
         password = str(ctx.params.get("password", ""))
+        engine = str(ctx.params.get("engine", "pymupdf")).lower()
 
         src = ctx.input_paths[0]
+        try:
+            import fitz  # PyMuPDF
+            has_fitz = True
+        except Exception:
+            has_fitz = False
+
+        if engine == "pymupdf" and has_fitz:
+            parts = self._extract_fitz(ctx, src, password, spec, mode)
+        else:
+            parts = self._extract_pypdf(ctx, src, password, spec, mode)
+
+        text = "\n\n".join(parts).strip()
+        if not text:
+            raise ToolError("no text found — this PDF may be scanned; run OCR first")
+        (ctx.output_dir / f"{src.stem}.txt").write_text(text, encoding="utf-8")
+        ctx.progress(1.0, "done")
+
+    def _select(self, spec: str, n: int) -> list[int]:
+        return _parse_pages(spec, n) if spec else list(range(n))
+
+    def _extract_fitz(self, ctx, src, password, spec, mode) -> list[str]:
+        import fitz
+        try:
+            doc = fitz.open(str(src))
+        except Exception:
+            raise ToolError("the input is not a valid PDF file") from None
+        try:
+            if doc.needs_pass:
+                if not password or not doc.authenticate(password):
+                    raise ToolError(
+                        "the PDF is password-protected — unlock it first, or provide the password"
+                        if not password else "could not decrypt the PDF — the password is wrong"
+                    )
+            total = doc.page_count or 1
+            indices = self._select(spec, doc.page_count)
+            # sort=True reconstructs natural reading order (columns/tables) — the
+            # PyMuPDF equivalent of pypdf's slower "layout" mode.
+            sort = mode == "layout"
+            parts = []
+            for step, i in enumerate(indices):
+                ctx.progress(step / total, f"reading page {i + 1}")
+                try:
+                    parts.append(doc[i].get_text("text", sort=sort) or "")
+                except Exception:
+                    parts.append("")
+            return parts
+        finally:
+            doc.close()
+
+    def _extract_pypdf(self, ctx, src, password, spec, mode) -> list[str]:
         try:
             reader = PdfReader(str(src))
         except Exception:
@@ -68,29 +127,14 @@ class PdfExtractText(Tool):
                 raise ToolError(
                     "the PDF is password-protected — unlock it first, or provide the password"
                 )
-
         total = len(reader.pages) or 1
-        # Select which page indices to read; default is every page, in order.
-        if spec:
-            indices = _parse_pages(spec, len(reader.pages))
-        else:
-            indices = list(range(len(reader.pages)))
-
-        # pypdf's "layout" extraction_mode keeps columns/tables readable; "plain"
-        # (the default) flows text and is faster.
+        indices = self._select(spec, len(reader.pages))
         extract_kwargs = {"extraction_mode": "layout"} if mode == "layout" else {}
-
         parts = []
         for step, i in enumerate(indices):
             ctx.progress(step / total, f"reading page {i + 1}")
-            page = reader.pages[i]
-            # One malformed page must not abort the whole document — skip it.
             try:
-                parts.append(page.extract_text(**extract_kwargs) or "")
+                parts.append(reader.pages[i].extract_text(**extract_kwargs) or "")
             except Exception:
                 parts.append("")
-        text = "\n\n".join(parts).strip()
-        if not text:
-            raise ToolError("no text found — this PDF may be scanned; run OCR first")
-        (ctx.output_dir / f"{src.stem}.txt").write_text(text, encoding="utf-8")
-        ctx.progress(1.0, "done")
+        return parts
