@@ -10,11 +10,35 @@ from ._imaging import downscale_max, flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
-_VISION_MODEL = "moondream"
-# moondream only needs a modest image; downscaling here cuts the base64 payload
-# (a large upload would otherwise become a multi-hundred-MB JSON body) and
-# sidesteps BMP/TIFF/GIF decode issues by always re-encoding to JPEG.
+# Preferred vision models, best first. Qwen2.5-VL is far stronger than moondream
+# (richer descriptions, multilingual, in-image OCR, chart/table reading); moondream
+# stays as the small/fast fallback so the tool works even before the bigger model
+# is pulled.
+_PREFERRED_MODELS = ("qwen2.5vl:7b", "qwen2.5vl", "llama3.2-vision", "moondream")
+_FALLBACK_MODEL = "moondream"
+# Downscaling here cuts the base64 payload (a large upload would otherwise become a
+# multi-hundred-MB JSON body) and sidesteps BMP/TIFF/GIF decode issues by always
+# re-encoding to JPEG.
 _MAX_DIM = 1536
+
+
+def _installed_models() -> list[str]:
+    try:
+        r = httpx.get(f"{settings.ollama_url}/api/tags", timeout=2.0)
+        if r.status_code == 200:
+            return [m.get("name", "") for m in r.json().get("models", [])]
+    except Exception:
+        pass
+    return []
+
+
+def _best_vision_model(installed: list[str]) -> str | None:
+    """Best installed vision model by preference order, matching on name prefix."""
+    for pref in _PREFERRED_MODELS:
+        for name in installed:
+            if name == pref or name.startswith(pref + ":") or name.startswith(pref):
+                return name
+    return None
 
 
 @register
@@ -41,8 +65,9 @@ class ImageCaption(Tool):
                 "type": "string",
                 "title": "Vision model",
                 "description": (
-                    "Ollama vision model to use; leave blank for the default "
-                    "(moondream). Any other model must already be pulled."
+                    "Ollama vision model to use; leave blank to auto-pick the best "
+                    "installed (Qwen2.5-VL if pulled, else moondream). "
+                    "Any named model must already be pulled."
                 ),
                 "maxLength": 100,
             },
@@ -70,20 +95,19 @@ class ImageCaption(Tool):
     }
 
     def available(self) -> tuple[bool, str | None]:
-        try:
-            r = httpx.get(f"{settings.ollama_url}/api/tags", timeout=2.0)
-            if r.status_code == 200:
-                names = [m.get("name", "") for m in r.json().get("models", [])]
-                if any(n.startswith(_VISION_MODEL) for n in names):
-                    return True, None
-                return False, f"the vision model '{_VISION_MODEL}' is not pulled in Ollama"
-        except Exception:
-            pass
-        return False, "the local AI service (Ollama) is not running"
+        installed = _installed_models()
+        if not installed:
+            return False, "the local AI service (Ollama) is not running"
+        if _best_vision_model(installed):
+            return True, None
+        return False, f"no vision model is pulled in Ollama (try one of: {', '.join(_PREFERRED_MODELS)})"
 
     def run(self, ctx: ToolContext) -> None:
         prompt = str(ctx.params.get("prompt", "Describe this image in one or two sentences."))
-        model = str(ctx.params.get("model") or "").strip() or _VISION_MODEL
+        # explicit user choice wins; otherwise pick the best installed vision model
+        model = str(ctx.params.get("model") or "").strip()
+        if not model:
+            model = _best_vision_model(_installed_models()) or _FALLBACK_MODEL
         src = ctx.input_paths[0]
         # normalise + downscale to a small RGB JPEG before base64 (EXIF-correct,
         # bomb-guarded, ~100x smaller payload than sending the raw upload)

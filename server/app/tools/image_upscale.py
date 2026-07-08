@@ -12,16 +12,27 @@ from ._imaging import load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
-_WEIGHTS_URL = (
-    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
-)
+# model key -> (download url, cache filename). All are ESRGAN-family weights that
+# spandrel auto-detects and loads. UltraSharp is a community favourite that keeps
+# text/edges crisper than the RealESRGAN default.
+_WEIGHTS: dict[str, tuple[str, str]] = {
+    "realesrgan-x4plus": (
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "RealESRGAN_x4plus.pth",
+    ),
+    "ultrasharp-4x": (
+        "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/4x-UltraSharp.pth",
+        "4x-UltraSharp.pth",
+    ),
+}
+_DEFAULT_MODEL = "realesrgan-x4plus"
 
 # Cache the loaded model per (weights, precision) for the lifetime of the worker so
 # a warm worker skips the disk load + CUDA upload on every job.
 _MODELS: dict[tuple, object] = {}
 
 
-def _cache_path() -> Path:
+def _cache_path(filename: str) -> Path:
     """OS-appropriate cache location for the model weights (Windows/Linux/macOS).
 
     The previous hard-coded ``/root/.cache/selfx`` only existed on the Linux
@@ -29,7 +40,7 @@ def _cache_path() -> Path:
     """
     base = os.environ.get("SELFX_CACHE_DIR")
     root = Path(base) if base else Path.home() / ".cache" / "selfx"
-    return root / "RealESRGAN_x4plus.pth"
+    return root / filename
 
 
 @register
@@ -45,6 +56,16 @@ class ImageUpscale(Tool):
     params_schema = {
         "type": "object",
         "properties": {
+            "model": {
+                "type": "string",
+                "title": "Model",
+                "description": (
+                    "realesrgan-x4plus = balanced photo default; "
+                    "ultrasharp-4x = crisper edges/text (great for screenshots & art)"
+                ),
+                "enum": ["realesrgan-x4plus", "ultrasharp-4x"],
+                "default": "realesrgan-x4plus",
+            },
             "precision": {
                 "type": "string",
                 "title": "Precision",
@@ -54,7 +75,7 @@ class ImageUpscale(Tool):
                 ),
                 "enum": ["full", "half"],
                 "default": "full",
-            }
+            },
         },
     }
 
@@ -71,13 +92,14 @@ class ImageUpscale(Tool):
             return False, "the upscaling engine (spandrel) is not installed"
         return True, None
 
-    def _weights(self, ctx: ToolContext) -> Path:
-        cache = _cache_path()
+    def _weights(self, ctx: ToolContext, model_key: str) -> Path:
+        url, filename = _WEIGHTS.get(model_key, _WEIGHTS[_DEFAULT_MODEL])
+        cache = _cache_path(filename)
         if not cache.is_file():
             cache.parent.mkdir(parents=True, exist_ok=True)
             ctx.progress(0.15, "downloading the upscaling model (one time)")
             try:
-                urllib.request.urlretrieve(_WEIGHTS_URL, str(cache))
+                urllib.request.urlretrieve(url, str(cache))
             except Exception:
                 raise ToolError("could not download the upscaling model weights") from None
         return cache
@@ -100,7 +122,10 @@ class ImageUpscale(Tool):
         from PIL import Image
 
         half = str(ctx.params.get("precision", "full")) == "half"
-        weights = self._weights(ctx)
+        model_key = str(ctx.params.get("model") or _DEFAULT_MODEL)
+        if model_key not in _WEIGHTS:
+            model_key = _DEFAULT_MODEL
+        weights = self._weights(ctx, model_key)
         model = self._model(weights, half)
         src = ctx.input_paths[0]
         # load_image applies EXIF orientation (phone photos upscale upright) and the
