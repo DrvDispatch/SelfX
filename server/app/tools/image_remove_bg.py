@@ -1,4 +1,5 @@
-"""image-remove-bg: remove an image background with rembg (U^2-Net, CPU/ONNX)."""
+"""image-remove-bg: remove an image background with rembg. Defaults to BiRefNet
+(SOTA matting), with U^2-Net kept as the fast option (CPU/ONNX)."""
 
 from ._imaging import downscale_max, load_image
 from .base import Tool, ToolContext, ToolError
@@ -38,9 +39,21 @@ class ImageRemoveBg(Tool):
             "model": {
                 "type": "string",
                 "title": "Model",
-                "description": "u2net = general, isnet-general-use = higher quality",
-                "enum": ["u2net", "isnet-general-use", "u2netp", "silueta"],
-                "default": "u2net",
+                "description": (
+                    "birefnet-general = best quality (SOTA edges/hair); "
+                    "birefnet-portrait = tuned for people; *-lite / u2net = faster"
+                ),
+                "enum": [
+                    "birefnet-general",
+                    "birefnet-general-lite",
+                    "birefnet-portrait",
+                    "isnet-general-use",
+                    "u2net",
+                    "u2net_human_seg",
+                    "u2netp",
+                    "silueta",
+                ],
+                "default": "birefnet-general",
             },
             "alpha_matting": {
                 "type": "boolean",
@@ -101,7 +114,7 @@ class ImageRemoveBg(Tool):
             except (TypeError, ValueError):
                 return default
 
-        model = str(ctx.params.get("model", "u2net"))
+        model = str(ctx.params.get("model", "birefnet-general"))
         alpha_matting = bool(ctx.params.get("alpha_matting", False))
         full_res = bool(ctx.params.get("full_resolution", False))
         src = ctx.input_paths[0]

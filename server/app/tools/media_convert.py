@@ -32,10 +32,21 @@ _PRESETS: dict[str, tuple[str, list[str]]] = {
     "gif": ("gif", ["-vf",
                     "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];"
                     "[s0]palettegen[p];[s1][p]paletteuse"]),
+    # GPU hardware encoders (NVIDIA NVENC) — many times faster than libx264/libx265
+    # when the video actually needs re-encoding. Falls back to a clear ffmpeg error
+    # on a box without an NVIDIA GPU. Video args are built in _video_plan.
+    "mp4-nvenc-h264": ("mp4", []),
+    "mp4-nvenc-hevc": ("mp4", []),
 }
 
-# The two presets that re-encode video; they support per-stream copy decisions.
-_VIDEO_PRESETS = ("mp4-h264", "webm-vp9")
+# preset -> (nvenc encoder, target vcodec for the copy-if-already-matching check)
+_NVENC: dict[str, tuple[str, str]] = {
+    "mp4-nvenc-h264": ("h264_nvenc", "h264"),
+    "mp4-nvenc-hevc": ("hevc_nvenc", "hevc"),
+}
+
+# The presets that re-encode video; they support per-stream copy decisions.
+_VIDEO_PRESETS = ("mp4-h264", "webm-vp9", "mp4-nvenc-h264", "mp4-nvenc-hevc")
 
 # The libvpx-vp9 video-only encoder args, shared by the single-pass fragment and
 # the optional two-pass analysis run.
@@ -87,7 +98,22 @@ def _video_plan(info: dict, preset: str, speed: str) -> tuple[list[str], bool, s
     venc = False
     a_copied = False
 
-    if preset == "mp4-h264":
+    if preset in _NVENC:
+        enc, target = _NVENC[preset]
+        if has_v and vc == target:
+            frag += ["-c:v", "copy"]
+        else:
+            # p5 = balanced NVENC preset; VBR rate control with a -cq target added in run()
+            frag += ["-c:v", enc, "-preset", "p5", "-rc", "vbr"]
+            venc = True
+        if has_a:
+            if ac == "aac":
+                frag += ["-c:a", "copy"]
+                a_copied = True
+            else:
+                frag += ["-c:a", "aac", "-b:a", "160k"]
+        frag += ["-movflags", "+faststart"]
+    elif preset == "mp4-h264":
         if has_v and vc == "h264":
             frag += ["-c:v", "copy"]
         else:
@@ -146,8 +172,9 @@ class MediaConvert(Tool):
             },
             "crf": {
                 "type": "integer",
-                "title": "Quality (CRF)",
-                "description": "Lower = better/larger. Only used for mp4/webm (0-51).",
+                "title": "Quality (CRF / CQ)",
+                "description": "Lower = better/larger. Used for mp4/webm re-encodes; "
+                               "for the GPU NVENC presets this sets the CQ target (0-51).",
                 "minimum": 0,
                 "maximum": 51,
             },
@@ -224,8 +251,11 @@ class MediaConvert(Tool):
             if venc:
                 if crf is None and preset == "webm-vp9":
                     crf = 32  # VP9 CQ mode needs a -crf; -b:v 0 alone is undefined quality
+                if crf is None and preset in _NVENC:
+                    crf = 23 if preset == "mp4-nvenc-h264" else 26  # NVENC needs a -cq target
                 if crf is not None:
-                    argv += ["-crf", str(int(crf))]
+                    # NVENC uses -cq (constant quality) rather than libx264/libvpx -crf
+                    argv += (["-cq", str(int(crf))] if preset in _NVENC else ["-crf", str(int(crf))])
                 if str(ctx.params.get("subtitles", "auto")) == "none":
                     argv += ["-sn"]
                 # Optional two-pass VP9: run the analysis pass now, then tell the

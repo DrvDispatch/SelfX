@@ -50,8 +50,20 @@ class VoiceIsolation(Tool):
             "model": {
                 "type": "string",
                 "title": "Model",
-                "enum": ["UVR-MDX-NET-Inst_HQ_3.onnx", "UVR_MDXNET_KARA_2.onnx"],
-                "default": "UVR-MDX-NET-Inst_HQ_3.onnx",
+                "description": (
+                    "Mel-Band Roformer = best quality vocals/instrumental (default). "
+                    "htdemucs = Demucs v4 4-stem, htdemucs_6s = 6-stem (adds guitar/piano). "
+                    "UVR-MDX = fast ONNX."
+                ),
+                "enum": [
+                    "vocals_mel_band_roformer.ckpt",
+                    "melband_roformer_inst_v2.ckpt",
+                    "htdemucs_ft.yaml",
+                    "htdemucs_6s.yaml",
+                    "UVR-MDX-NET-Inst_HQ_3.onnx",
+                    "UVR_MDXNET_KARA_2.onnx",
+                ],
+                "default": "vocals_mel_band_roformer.ckpt",
             },
             "output_format": {
                 "type": "string",
@@ -79,7 +91,7 @@ class VoiceIsolation(Tool):
             return False, "the source-separation engine (audio-separator) is not installed"
 
     def run(self, ctx: ToolContext) -> None:
-        model = str(ctx.params.get("model", "UVR-MDX-NET-Inst_HQ_3.onnx"))
+        model = str(ctx.params.get("model", "vocals_mel_band_roformer.ckpt"))
         out_fmt = str(ctx.params.get("output_format", "mp3")).upper()
         rename_outputs = bool(ctx.params.get("rename_outputs", False))
         src = ctx.input_paths[0]
