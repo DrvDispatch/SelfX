@@ -1,5 +1,6 @@
 """RQ worker entrypoint (`python -m app.worker`) and run_tool(job_id) — SPEC §6."""
 
+import json
 import logging
 import re
 import shutil
@@ -14,12 +15,28 @@ from rq import Queue, Worker
 from .config import settings
 from .db import SessionLocal, init_db
 from .models import File, Job
+from .queueing import JOB_EVENTS_CHANNEL, redis_conn
 from .storage import ensure_dirs, file_abs_path, outputs_dir, sniff_mime_file, tmp_dir
 from .tools import discover
 from .tools.base import ToolContext, ToolError
 from .tools.registry import get_tool
 
 logger = logging.getLogger("selfx.worker")
+
+
+def _publish_job(job: Job) -> None:
+    """Best-effort push of a job's current state to the SSE channel (live progress)."""
+    try:
+        redis_conn.publish(JOB_EVENTS_CHANNEL, json.dumps({
+            "id": str(job.id),
+            "user_id": str(job.user_id),
+            "tool": job.tool,
+            "status": job.status,
+            "progress": job.progress,
+            "message": job.message,
+        }))
+    except Exception:
+        pass  # streaming is best-effort; the poll fallback still reconciles
 
 # RQ imports this module by dotted path; make sure adapters are registered.
 discover()
@@ -38,6 +55,7 @@ def _set_progress(job_id: UUID, fraction: float, message: str = "") -> None:
         if message:
             job.message = message[:512]
         db.commit()
+        _publish_job(job)
 
 
 def _mark_failed(job_id: UUID, message: str) -> None:
@@ -50,6 +68,7 @@ def _mark_failed(job_id: UUID, message: str) -> None:
             job.error = message[:2000]
             job.finished_at = _utcnow()
             db.commit()
+            _publish_job(job)
             logger.info("job %s -> error: %s", job_id, message)
     except Exception:
         logger.exception("could not mark job %s as failed", job_id)
@@ -179,6 +198,7 @@ def run_tool(job_id: str, params: dict | None = None) -> None:
             job.started_at = _utcnow()
             job.message = "starting"
             db.commit()
+            _publish_job(job)
             logger.info("job %s -> running (tool=%s)", jid, job.tool)
 
             tool = get_tool(job.tool)
@@ -235,6 +255,7 @@ def run_tool(job_id: str, params: dict | None = None) -> None:
             job.progress = 1.0
             job.finished_at = _utcnow()
             db.commit()
+            _publish_job(job)
             logger.info("job %s -> done (%d output file(s))", jid, n_outputs)
     except ToolError as exc:
         logger.error("job %s tool error: %s", jid, exc, exc_info=True)
@@ -263,6 +284,7 @@ def run_batch(job_id: str, tool_slug: str, params: dict | None = None) -> None:
             job.started_at = _utcnow()
             job.message = "starting batch"
             db.commit()
+            _publish_job(job)
 
             tool = get_tool(tool_slug)
             if tool is None:
@@ -322,6 +344,7 @@ def run_batch(job_id: str, tool_slug: str, params: dict | None = None) -> None:
             job.finished_at = _utcnow()
             job.message = f"{n_ok}/{total} succeeded" + (f", {len(errors)} failed" if errors else "")
             db.commit()
+            _publish_job(job)
             logger.info("batch job %s done (%d/%d ok)", jid, n_ok, total)
     except ToolError as exc:
         _mark_failed(jid, str(exc))
@@ -347,6 +370,7 @@ def run_pipeline(job_id: str, steps: list[dict] | None = None) -> None:
             job.started_at = _utcnow()
             job.message = "starting pipeline"
             db.commit()
+            _publish_job(job)
 
             chain = steps if steps is not None else (job.params or {}).get("steps") or []
             if not chain:
@@ -419,6 +443,7 @@ def run_pipeline(job_id: str, steps: list[dict] | None = None) -> None:
             job.finished_at = _utcnow()
             job.message = f"{n} steps completed"
             db.commit()
+            _publish_job(job)
             logger.info("pipeline job %s done (%d steps, %d output(s))", jid, n, n_outputs)
     except ToolError as exc:
         _mark_failed(jid, str(exc))

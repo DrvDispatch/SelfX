@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { BookOpen, Boxes, ChevronDown, Clipboard, Cpu, Layers, LayoutGrid, ListChecks, LogOut, Moon, Search, Shield, Sparkles, Sun, Workflow, type LucideIcon } from "lucide-react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { BookOpen, Boxes, ChevronDown, Clipboard, Cpu, Layers, LayoutGrid, ListChecks, LogOut, Menu, Moon, Search, Shield, Sparkles, Sun, Workflow, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
 import { imageFromPasteEvent } from "../clipboard";
 import CommandPalette from "./CommandPalette";
+
+interface NavItem { to: string; label: string; icon: LucideIcon; admin?: boolean; end?: boolean }
 
 function navClass({ isActive }: { isActive: boolean }): string {
   return [
@@ -15,8 +17,17 @@ function navClass({ isActive }: { isActive: boolean }): string {
   ].join(" ");
 }
 
+// Primary pages shown in the desktop header and (with MORE_ITEMS) the mobile drawer.
+const PRIMARY: NavItem[] = [
+  { to: "/", label: "Tools", icon: LayoutGrid, end: true },
+  { to: "/assistant", label: "Assistant", icon: Sparkles },
+  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
+  { to: "/paste", label: "Paste", icon: Clipboard },
+  { to: "/jobs", label: "Jobs", icon: ListChecks },
+];
+
 // Secondary / power-user pages, tucked under the "More" menu so the header never wraps.
-const MORE_ITEMS: { to: string; label: string; icon: LucideIcon; admin?: boolean }[] = [
+const MORE_ITEMS: NavItem[] = [
   { to: "/batch", label: "Batch", icon: Layers },
   { to: "/pipeline", label: "Pipeline", icon: Workflow },
   { to: "/quick-tools", label: "Quick Tools", icon: Boxes },
@@ -28,8 +39,13 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const { resolved, toggle } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Close the mobile drawer whenever the route changes.
+  useEffect(() => setDrawerOpen(false), [location.pathname]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -68,11 +84,19 @@ export default function Layout() {
     <div className="min-h-full">
       <header className="sticky top-0 z-30 border-b border-line bg-surface/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Open menu"
+            className="-ml-1 grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-fg md:hidden"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
           <NavLink to="/" className="flex items-center gap-2 text-lg font-extrabold tracking-tight text-fg">
             <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary text-sm text-primary-fg">
               S
             </span>
-            Self<span className="text-primary">X</span>
+            <span className="hidden sm:inline">Self<span className="text-primary">X</span></span>
           </NavLink>
 
           <nav className="ml-3 hidden items-center gap-1 md:flex">
@@ -150,12 +174,12 @@ export default function Layout() {
             {resolved === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
 
-          <div className="flex items-center gap-2 rounded-full bg-surface-2 py-1 pl-3 pr-1">
-            <span className="max-w-[9rem] truncate text-sm text-fg" title={user?.username}>
+          <div className="flex items-center gap-2 rounded-full bg-surface-2 py-1 pl-1 pr-1 sm:pl-3">
+            <span className="hidden max-w-[9rem] truncate text-sm text-fg sm:inline" title={user?.username}>
               {user?.username}
             </span>
             {user?.is_admin && (
-              <span className="rounded-full bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary">
+              <span className="hidden rounded-full bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary sm:inline">
                 admin
               </span>
             )}
@@ -170,6 +194,48 @@ export default function Layout() {
           </div>
         </div>
       </header>
+
+      {/* Mobile navigation drawer */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-40 md:hidden" role="dialog" aria-modal="true">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} />
+          <nav className="animate-in absolute inset-y-0 left-0 flex w-72 max-w-[82%] flex-col gap-1 overflow-y-auto border-r border-line bg-surface p-3 shadow-[var(--shadow-pop)]">
+            <div className="mb-2 flex items-center justify-between px-1 py-1">
+              <span className="flex items-center gap-2 text-lg font-extrabold text-fg">
+                <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary text-sm text-primary-fg">S</span>
+                Self<span className="-ml-2 text-primary">X</span>
+              </span>
+              <button onClick={() => setDrawerOpen(false)} aria-label="Close menu" className="grid h-8 w-8 place-items-center rounded-full text-muted hover:bg-surface-2 hover:text-fg">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <button
+              onClick={() => { setDrawerOpen(false); setPaletteOpen(true); }}
+              className="mb-1 flex items-center gap-2.5 rounded-xl bg-surface-2 px-3 py-2.5 text-sm text-muted"
+            >
+              <Search className="h-4 w-4" /> Search tools & pages
+            </button>
+            {[...PRIMARY, ...MORE_ITEMS.filter((it) => !it.admin || user?.is_admin)].map((it) => {
+              const Icon = it.icon;
+              return (
+                <NavLink
+                  key={it.to}
+                  to={it.to}
+                  end={it.end}
+                  onClick={() => setDrawerOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+                      isActive ? "bg-primary-soft text-primary" : "text-fg hover:bg-surface-2"
+                    }`
+                  }
+                >
+                  <Icon className="h-4.5 w-4.5 shrink-0" /> {it.label}
+                </NavLink>
+              );
+            })}
+          </nav>
+        </div>
+      )}
 
       <main className="animate-in mx-auto max-w-6xl px-4 py-6 sm:py-8">
         <Outlet />

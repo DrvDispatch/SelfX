@@ -14,6 +14,7 @@ import {
   type KbCollection,
   type KbDocument,
 } from "../api";
+import Markdown from "../components/Markdown";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ConfirmDialog";
 
@@ -130,9 +131,9 @@ export default function KnowledgeBase() {
   };
 
   return (
-    <div className="grid h-[calc(100vh-9rem)] grid-cols-[16rem_1fr] gap-4">
+    <div className="grid h-[calc(100dvh-8rem)] grid-rows-[auto_1fr] gap-3 md:grid-cols-[15rem_1fr] md:grid-rows-1">
       {/* collections sidebar */}
-      <aside className="flex flex-col gap-2 overflow-y-auto rounded-2xl border border-line bg-surface p-3">
+      <aside className="flex max-h-52 flex-col gap-2 overflow-y-auto rounded-2xl border border-line bg-surface p-3 md:max-h-none">
         <div className="flex items-center gap-2 px-1">
           <BookOpen className="h-4 w-4 text-primary" />
           <span className="font-semibold text-fg">Collections</span>
@@ -203,8 +204,8 @@ export default function KnowledgeBase() {
             {msgs.length === 0 && <p className="text-sm text-muted">Ask a question about this collection.</p>}
             {msgs.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-right" : ""}>
-                <div className={`inline-block max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm ${m.role === "user" ? "bg-primary text-primary-fg" : "bg-surface-2 text-fg"}`}>
-                  {m.content}
+                <div className={`inline-block max-w-[85%] rounded-2xl px-3.5 py-2 text-sm ${m.role === "user" ? "whitespace-pre-wrap bg-primary text-primary-fg" : "bg-surface-2 text-fg"}`}>
+                  {m.role === "user" ? m.content : <Markdown content={m.content} />}
                 </div>
                 {m.citations.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5">

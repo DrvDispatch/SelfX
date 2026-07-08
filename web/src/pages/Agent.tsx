@@ -10,6 +10,7 @@ import {
 } from "../api";
 import FilePreview, { type PreviewFile } from "../components/FilePreview";
 import FileChip, { type UploadItem } from "../components/FileChip";
+import Markdown from "../components/Markdown";
 import { useToast } from "../components/Toast";
 
 interface Turn {
@@ -70,8 +71,8 @@ function AssistantBubble({ content }: { content: string }) {
     }
   };
   return (
-    <div className="group/bubble relative inline-block max-w-full whitespace-pre-wrap rounded-2xl bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-fg">
-      {content}
+    <div className="group/bubble relative inline-block max-w-full rounded-2xl bg-surface-2 px-3.5 py-2">
+      <Markdown content={content} />
       <button
         onClick={() => void copy()}
         title="Copy"
@@ -156,7 +157,7 @@ export default function Agent() {
   const canSend = useMemo(() => !busy && (input.trim().length > 0 || attached.length > 0), [busy, input, attached]);
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-9rem)] max-w-3xl flex-col">
+    <div className="mx-auto flex h-[calc(100dvh-8rem)] max-w-3xl flex-col">
       <div className="mb-3 flex items-center gap-2">
         <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary-soft">
           <Sparkles className="h-5 w-5 text-primary" />

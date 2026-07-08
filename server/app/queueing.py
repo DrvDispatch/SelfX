@@ -12,6 +12,10 @@ logger = logging.getLogger("selfx.queueing")
 
 QUEUE_NAMES = ("default", "heavy")
 
+# Redis pub/sub channel the worker publishes job state to, and the SSE endpoint
+# subscribes to for live progress (replaces client-side polling).
+JOB_EVENTS_CHANNEL = "selfx:job-events"
+
 redis_conn = Redis.from_url(settings.redis_url)
 
 _queues: dict[str, Queue] = {}

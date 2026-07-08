@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ListChecks } from "lucide-react";
-import { ApiError, cancelJob, deleteJob, listJobs } from "../api";
+import { ApiError, cancelJob, deleteJob, listJobs, streamJobEvents } from "../api";
 import JobRow from "../components/JobRow";
 import { RowsSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
@@ -19,25 +19,13 @@ export default function Jobs() {
   const [error, setError] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const highlight = searchParams.get("highlight");
-  const prevStatus = useRef<Map<string, string>>(new Map());
-  const firstLoad = useRef(true);
+  const announced = useRef<Set<string>>(new Set());
+  const jobsRef = useRef<Job[]>([]);
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   const load = useCallback(async () => {
     try {
       const res = await listJobs(PAGE_SIZE, 0);
-      // Toast jobs that just finished (skip the very first load so we don't
-      // announce history on page open).
-      if (!firstLoad.current) {
-        for (const j of res.items) {
-          const was = prevStatus.current.get(j.id);
-          if ((was === "queued" || was === "running")) {
-            if (j.status === "done") toast.success(`“${j.tool}” finished`);
-            else if (j.status === "error") toast.error(`“${j.tool}” failed`);
-          }
-        }
-      }
-      prevStatus.current = new Map(res.items.map((j) => [j.id, j.status]));
-      firstLoad.current = false;
       setJobs(res.items);
       setTotal(res.total);
       setError(null);
@@ -46,17 +34,40 @@ export default function Jobs() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  // Live updates via SSE: patch rows in place, and on completion toast (once) +
+  // reload to pull in the finished job's output files.
+  useEffect(() => {
+    const stop = streamJobEvents((e) => {
+      const known = jobsRef.current.some((j) => j.id === e.id);
+      if (known) {
+        setJobs((prev) =>
+          prev.map((j) => (j.id === e.id ? { ...j, status: e.status as Job["status"], progress: e.progress, message: e.message } : j)),
+        );
+      }
+      if ((e.status === "done" || e.status === "error") && !announced.current.has(e.id)) {
+        announced.current.add(e.id);
+        if (e.status === "done") toast.success(`“${e.tool}” finished`);
+        else toast.error(`“${e.tool}” failed`);
+        void load(); // refresh to pull output files
+      } else if (!known) {
+        void load(); // a job we haven't seen yet (e.g. just created)
+      }
+    });
+    return stop;
+  }, [load, toast]);
+
+  // Safety-net reconcile in case the SSE stream drops (proxies, sleep, etc.).
   useEffect(() => {
     const active = jobs.some((j) => j.status === "queued" || j.status === "running");
     if (!active) return;
-    const timer = setTimeout(() => void load(), 2000);
-    return () => clearTimeout(timer);
+    const timer = setInterval(() => void load(), 8000);
+    return () => clearInterval(timer);
   }, [jobs, load]);
 
   const onCancel = async (id: string) => {

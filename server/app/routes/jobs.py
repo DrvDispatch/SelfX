@@ -1,20 +1,26 @@
 """Jobs CRUD: create/validate/enqueue, list, get, cancel, delete (SPEC §5)."""
 
+import asyncio
+import json
 import logging
 import shutil
+import time
 from uuid import UUID
 
 import jsonschema
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from redis import asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import storage
 from ..auth import get_current_user
+from ..config import settings
 from ..db import get_db
 from ..models import File, Job, User, utcnow
-from ..queueing import cancel_rq_job, enqueue_batch, enqueue_job, enqueue_pipeline
+from ..queueing import JOB_EVENTS_CHANNEL, cancel_rq_job, enqueue_batch, enqueue_job, enqueue_pipeline
 from ..ratelimit import RATE_LIMIT, limiter
 from ..schemas import FileInfo, JobCreate, JobList, JobOut
 from ..services.jobs import create_and_run_job
@@ -312,6 +318,60 @@ def create_pipeline(
     logger.info("pipeline job %s (%d steps) by %s", job.id, len(resolved), user.username)
     db.refresh(job)
     return job_to_schema(job)
+
+
+@router.get("/stream")
+async def stream_jobs(request: Request, user: User = Depends(get_current_user)) -> StreamingResponse:
+    """Server-sent events: live job status/progress for the current user.
+
+    The worker publishes each job state change to a Redis channel; this endpoint
+    subscribes and forwards only this user's events, so the UI updates in real time
+    instead of polling every couple of seconds.
+    """
+    uid = str(user.id)
+
+    async def gen():
+        client = aioredis.from_url(settings.redis_url, decode_responses=True)
+        pubsub = client.pubsub()
+        await pubsub.subscribe(JOB_EVENTS_CHANNEL)
+        try:
+            yield ": connected\n\n"
+            last_ping = time.monotonic()
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except Exception:
+                    break
+                if msg and msg.get("type") == "message":
+                    try:
+                        data = json.loads(msg["data"])
+                    except (ValueError, TypeError):
+                        data = None
+                    if isinstance(data, dict) and data.get("user_id") == uid:
+                        yield f"data: {json.dumps(data)}\n\n"
+                # keep the connection alive through proxies during idle periods
+                if time.monotonic() - last_ping > 20:
+                    last_ping = time.monotonic()
+                    yield ": ping\n\n"
+                await asyncio.sleep(0)  # yield control
+        finally:
+            for close in (
+                lambda: pubsub.unsubscribe(JOB_EVENTS_CHANNEL),
+                lambda: getattr(pubsub, "aclose", pubsub.close)(),
+                lambda: getattr(client, "aclose", client.close)(),
+            ):
+                try:
+                    await close()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("", response_model=JobList)

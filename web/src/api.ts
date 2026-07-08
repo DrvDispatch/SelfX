@@ -268,6 +268,75 @@ export function listJobs(limit = 50, offset = 0): Promise<JobList> {
   return request<JobList>(`/jobs?limit=${limit}&offset=${offset}`);
 }
 
+export interface JobEvent {
+  id: string;
+  tool: string;
+  status: string;
+  progress: number;
+  message: string | null;
+}
+
+/**
+ * Subscribe to live job updates over SSE (fetch-based so we can send the auth
+ * header). Auto-reconnects on drop. Returns a stop() function.
+ */
+export function streamJobEvents(onEvent: (e: JobEvent) => void): () => void {
+  const controller = new AbortController();
+  let stopped = false;
+
+  const run = async () => {
+    while (!stopped) {
+      try {
+        const token = getToken();
+        const res = await fetch(`${BASE}/jobs/stream`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: controller.signal,
+        });
+        if (res.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!res.ok || !res.body) throw new Error("stream failed");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf("\n\n")) !== -1) {
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            for (const line of block.split("\n")) {
+              if (line.startsWith("data:")) {
+                const payload = line.slice(5).trim();
+                if (payload) {
+                  try {
+                    onEvent(JSON.parse(payload) as JobEvent);
+                  } catch {
+                    /* ignore malformed event */
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        if (stopped || controller.signal.aborted) return;
+      }
+      if (stopped) return;
+      await new Promise((r) => setTimeout(r, 2000)); // reconnect backoff
+    }
+  };
+
+  void run();
+  return () => {
+    stopped = true;
+    controller.abort();
+  };
+}
+
 export function getJob(id: string): Promise<Job> {
   return request<Job>(`/jobs/${id}`);
 }
