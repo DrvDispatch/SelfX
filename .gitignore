@@ -36,3 +36,8 @@ Thumbs.db
 # claude code session state
 .claude/
 transcripts/
+
+# stray temp/scratchpad files accidentally written into the repo root
+*scratchpad*
+*AppData*
+*Temp?claude*
