@@ -1,13 +1,24 @@
-"""image-to-text: OCR an image to plain text with RapidOCR (PP-OCR models, CPU/ONNX)."""
+"""image-to-text: OCR an image to plain text.
+
+Two engines: EasyOCR (default — 80+ languages, GPU-accelerated, higher accuracy)
+and RapidOCR (fast pure-ONNX CPU fallback, PP-OCR models). Both yield rows of
+[box, text, score] so the confidence / reading-order handling is shared.
+"""
 
 from ._imaging import downscale_max, flatten_rgb, load_image
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
-_ENGINE = None  # cache the OCR engine across jobs in this worker
+_ENGINE = None  # cached RapidOCR engine
+_EASY_READERS: dict[tuple, object] = {}  # cached EasyOCR readers keyed by language set
 # Downscale oversized inputs before detection to cut memory / time; large scans
 # past this size gain little accuracy and dominate CPU cost.
 _MAX_DIM = 1536
+
+# Common EasyOCR language codes the UI advertises (it supports 80+; any valid code
+# works). Kept small and CJK-compatible-grouped for the picker.
+_EASY_LANGS = ["en", "ch_sim", "ch_tra", "ja", "ko", "fr", "de", "es", "it",
+               "pt", "ru", "ar", "hi", "fa", "nl", "tr", "vi", "th"]
 
 
 def _engine():
@@ -16,6 +27,26 @@ def _engine():
         from rapidocr_onnxruntime import RapidOCR
         _ENGINE = RapidOCR()
     return _ENGINE
+
+
+def _easyocr_reader(langs: tuple[str, ...]):
+    reader = _EASY_READERS.get(langs)
+    if reader is None:
+        import easyocr
+        import torch
+        reader = easyocr.Reader(list(langs), gpu=torch.cuda.is_available())
+        _EASY_READERS[langs] = reader
+    return reader
+
+
+def _norm_langs(raw: object) -> tuple[str, ...]:
+    """Parse a comma/space separated language string into a validated EasyOCR set.
+    EasyOCR requires compatible groups; on an invalid combo we fall back to English."""
+    if not raw:
+        return ("en",)
+    parts = [p.strip() for p in str(raw).replace(",", " ").split() if p.strip()]
+    langs = tuple(dict.fromkeys(p for p in parts if p in _EASY_LANGS)) or ("en",)
+    return langs
 
 
 def _row_sort_key(row):
@@ -48,6 +79,22 @@ class ImageToText(Tool):
     params_schema = {
         "type": "object",
         "properties": {
+            "engine": {
+                "type": "string",
+                "title": "OCR engine",
+                "description": "easyocr = 80+ languages, GPU, higher accuracy; "
+                               "rapidocr = fast CPU fallback.",
+                "enum": ["easyocr", "rapidocr"],
+                "default": "easyocr",
+            },
+            "languages": {
+                "type": "string",
+                "title": "Languages (EasyOCR)",
+                "description": "Comma-separated codes, e.g. 'en' or 'en,ch_sim'. "
+                               "Codes: " + ", ".join(_EASY_LANGS),
+                "default": "en",
+                "maxLength": 60,
+            },
             "max_dim": {
                 "type": "integer",
                 "title": "Detection size cap (px)",
@@ -83,11 +130,13 @@ class ImageToText(Tool):
     }
 
     def available(self) -> tuple[bool, str | None]:
-        try:
-            import rapidocr_onnxruntime  # noqa: F401
-            return True, None
-        except Exception:
-            return False, "the OCR engine (RapidOCR) is not installed"
+        for mod in ("easyocr", "rapidocr_onnxruntime"):
+            try:
+                __import__(mod)
+                return True, None
+            except Exception:
+                continue
+        return False, "no OCR engine (EasyOCR / RapidOCR) is installed"
 
     def run(self, ctx: ToolContext) -> None:
         try:
@@ -100,6 +149,8 @@ class ImageToText(Tool):
             min_conf = 0.0
         detect_rotation = bool(ctx.params.get("detect_rotation", False))
         reading_order = bool(ctx.params.get("reading_order", False))
+        engine = str(ctx.params.get("engine", "easyocr")).lower()
+        langs = _norm_langs(ctx.params.get("languages", "en"))
 
         src = ctx.input_paths[0]
         # load_image applies the decompression-bomb guard (huge scans OOM the worker)
@@ -115,15 +166,32 @@ class ImageToText(Tool):
             ocr_input = str(tmp)
         img.close()
         ctx.progress(0.3, "reading text (first run loads the model)")
-        call_kw: dict = {}
-        if detect_rotation:
-            call_kw["use_cls"] = True
+        # Pick the engine; fall back to RapidOCR if EasyOCR isn't importable so the
+        # tool keeps working. Both branches build rows of [box, text, score].
+        want_easy = engine == "easyocr"
         try:
-            result, _ = _engine()(ocr_input, **call_kw)
+            import easyocr  # noqa: F401
+            has_easy = True
         except Exception:
-            raise ToolError("OCR failed — the file may not be a readable image") from None
-
-        rows = list(result) if result else []
+            has_easy = False
+        rows: list = []
+        if want_easy and has_easy:
+            try:
+                reader = _easyocr_reader(langs)
+                rot = [90, 180, 270] if detect_rotation else None
+                raw = reader.readtext(ocr_input, detail=1, paragraph=False, rotation_info=rot)
+                rows = [[box, text, float(conf)] for (box, text, conf) in raw]
+            except Exception:
+                raise ToolError("OCR failed — the file may not be a readable image") from None
+        else:
+            call_kw: dict = {}
+            if detect_rotation:
+                call_kw["use_cls"] = True
+            try:
+                result, _ = _engine()(ocr_input, **call_kw)
+            except Exception:
+                raise ToolError("OCR failed — the file may not be a readable image") from None
+            rows = list(result) if result else []
         if min_conf > 0:
             kept = []
             for row in rows:
