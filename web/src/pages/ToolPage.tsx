@@ -1,10 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Play } from "lucide-react";
-import { ApiError, createJob, listTools, uploadFile } from "../api";
+import { ArrowLeft, Bookmark, BookmarkPlus, Play, X } from "lucide-react";
+import {
+  ApiError,
+  createJob,
+  createPreset,
+  deletePreset,
+  listPresets,
+  listTools,
+  uploadFile,
+  type Preset,
+} from "../api";
 import FileDrop from "../components/FileDrop";
 import ParamsForm from "../components/ParamsForm";
+import { addRecentTool } from "../prefs";
 import type { ToolInfo } from "../types";
+
+function defaultsFor(tool: ToolInfo): Record<string, unknown> {
+  const init: Record<string, unknown> = {};
+  for (const [name, prop] of Object.entries(tool.params_schema.properties ?? {})) {
+    if (prop.default !== undefined) init[name] = prop.default;
+  }
+  return init;
+}
 
 export default function ToolPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -20,6 +38,10 @@ export default function ToolPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [step, setStep] = useState<string | null>(null);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const [presetMsg, setPresetMsg] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,11 +69,14 @@ export default function ToolPage() {
   // Pre-fill defaults from the schema whenever the tool changes.
   useEffect(() => {
     if (!tool) return;
-    const init: Record<string, unknown> = {};
-    for (const [name, prop] of Object.entries(tool.params_schema.properties ?? {})) {
-      if (prop.default !== undefined) init[name] = prop.default;
-    }
-    setParams(init);
+    setParams(defaultsFor(tool));
+    addRecentTool(tool.slug);
+    setSavingPreset(false);
+    setPresetName("");
+    setPresetMsg(null);
+    listPresets()
+      .then((all) => setPresets(all.filter((p) => p.tool === tool.slug)))
+      .catch(() => setPresets([]));
     if (presetFiles?.length && tool.min_files > 0) {
       const acc = tool.accepts.map((a) => a.toLowerCase());
       const matched = presetFiles.filter(
@@ -107,6 +132,40 @@ export default function ToolPage() {
       setSubmitError(e instanceof ApiError ? e.detail : "Failed to start job");
       setSubmitting(false);
       setStep(null);
+    }
+  };
+
+  const applyPreset = (p: Preset) => {
+    if (!tool) return;
+    setParams({ ...defaultsFor(tool), ...p.params });
+    setPresetMsg(`Loaded "${p.name}"`);
+  };
+
+  const savePreset = async () => {
+    if (!tool) return;
+    const name = presetName.trim();
+    if (!name) return;
+    const cleaned: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== "") cleaned[k] = v;
+    }
+    try {
+      const created = await createPreset(name, tool.slug, cleaned);
+      setPresets((prev) => [created, ...prev.filter((x) => x.id !== created.id)]);
+      setSavingPreset(false);
+      setPresetName("");
+      setPresetMsg(`Saved "${created.name}"`);
+    } catch (e) {
+      setPresetMsg(e instanceof ApiError ? e.detail : "Couldn't save preset");
+    }
+  };
+
+  const removePreset = async (p: Preset) => {
+    try {
+      await deletePreset(p.id);
+      setPresets((prev) => prev.filter((x) => x.id !== p.id));
+    } catch {
+      setPresetMsg("Couldn't delete preset");
     }
   };
 
@@ -178,6 +237,88 @@ export default function ToolPage() {
           disabled={submitting || !tool.available}
         />
       </section>
+
+      {Object.keys(tool.params_schema.properties ?? {}).length > 0 && (
+        <section className="mb-6">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium text-fg">Presets</h2>
+            {!savingPreset && (
+              <button
+                type="button"
+                onClick={() => { setSavingPreset(true); setPresetMsg(null); }}
+                className="inline-flex items-center gap-1.5 text-sm text-primary transition-colors hover:opacity-80"
+              >
+                <BookmarkPlus className="h-4 w-4" /> Save current
+              </button>
+            )}
+          </div>
+
+          {savingPreset && (
+            <div className="mb-2 flex items-center gap-2">
+              <input
+                autoFocus
+                value={presetName}
+                onChange={(e) => setPresetName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); void savePreset(); }
+                  if (e.key === "Escape") setSavingPreset(false);
+                }}
+                placeholder="Preset name…"
+                maxLength={80}
+                className="min-w-0 flex-1 rounded-xl border border-line bg-surface-2 px-3 py-2 text-sm text-fg outline-none focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={() => void savePreset()}
+                disabled={!presetName.trim()}
+                className="rounded-xl bg-primary px-3 py-2 text-sm font-medium text-primary-fg disabled:opacity-50"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setSavingPreset(false)}
+                className="rounded-xl bg-surface-2 px-3 py-2 text-sm text-muted hover:text-fg"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {presets.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {presets.map((p) => (
+                <span
+                  key={p.id}
+                  className="flex items-center gap-1.5 rounded-full border border-line bg-surface-2 py-1 pl-3 pr-1.5 text-sm"
+                >
+                  <button
+                    type="button"
+                    onClick={() => applyPreset(p)}
+                    className="flex items-center gap-1.5 text-fg hover:text-primary"
+                    title="Apply this preset"
+                  >
+                    <Bookmark className="h-3.5 w-3.5 text-primary" /> {p.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void removePreset(p)}
+                    className="grid h-5 w-5 place-items-center rounded-full text-faint hover:bg-line hover:text-danger"
+                    title="Delete preset"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            !savingPreset && (
+              <p className="text-sm text-muted">No presets yet — set your options, then “Save current”.</p>
+            )
+          )}
+          {presetMsg && <p className="mt-2 text-xs text-muted">{presetMsg}</p>}
+        </section>
+      )}
 
       {submitError && (
         <p className="mb-4 rounded-xl border border-line bg-surface-2 px-3 py-2 text-sm text-danger">

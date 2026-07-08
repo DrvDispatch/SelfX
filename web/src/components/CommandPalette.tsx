@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { BookOpen, Boxes, LayoutGrid, ListChecks, Search, Sparkles, type LucideIcon } from "lucide-react";
+import { BookOpen, Boxes, Clipboard, Layers, LayoutGrid, ListChecks, Search, Sparkles, Workflow, type LucideIcon } from "lucide-react";
 import { listTools } from "../api";
 import { accentVar, categoryMeta } from "../categories";
 import type { ToolInfo } from "../types";
@@ -18,6 +18,9 @@ const PAGES: Item[] = [
   { id: "p-home", label: "Dashboard", sub: "All tools", to: "/", icon: LayoutGrid, accent: "quick" },
   { id: "p-assistant", label: "Assistant", sub: "Ask in natural language", to: "/assistant", icon: Sparkles, accent: "ai" },
   { id: "p-kb", label: "Knowledge", sub: "Chat with your documents", to: "/knowledge", icon: BookOpen, accent: "docs" },
+  { id: "p-paste", label: "Paste image", sub: "Paste a screenshot to save or edit", to: "/paste", icon: Clipboard, accent: "img" },
+  { id: "p-batch", label: "Batch", sub: "Run one tool over many files", to: "/batch", icon: Layers, accent: "util" },
+  { id: "p-pipeline", label: "Pipeline", sub: "Chain tools together", to: "/pipeline", icon: Workflow, accent: "ai" },
   { id: "p-jobs", label: "Jobs", sub: "History & downloads", to: "/jobs", icon: ListChecks, accent: "util" },
   { id: "p-quick", label: "Quick Tools", sub: "In-browser utilities", to: "/quick-tools", icon: Boxes, accent: "quick" },
   { id: "p-models", label: "AI Models", sub: "Manage Ollama models", to: "/models", icon: Boxes, accent: "media" },

@@ -6,6 +6,7 @@ from uuid import UUID
 
 import jsonschema
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -13,7 +14,7 @@ from .. import storage
 from ..auth import get_current_user
 from ..db import get_db
 from ..models import File, Job, User, utcnow
-from ..queueing import cancel_rq_job, enqueue_job
+from ..queueing import cancel_rq_job, enqueue_batch, enqueue_job, enqueue_pipeline
 from ..ratelimit import RATE_LIMIT, limiter
 from ..schemas import FileInfo, JobCreate, JobList, JobOut
 from ..services.jobs import create_and_run_job
@@ -147,6 +148,169 @@ def create_job(
 ) -> JobOut:
     # single validated choke-point shared with the NL agent
     job = create_and_run_job(db, user, payload.tool, payload.file_ids, payload.params)
+    return job_to_schema(job)
+
+
+class BatchCreate(BaseModel):
+    tool: str = Field(min_length=1, max_length=64)
+    file_ids: list[UUID] = Field(min_length=1)
+    params: dict = Field(default_factory=dict)
+
+
+@router.post("/batch", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit(RATE_LIMIT)
+def create_batch(
+    request: Request,
+    payload: BatchCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JobOut:
+    """Run one single-file tool over many files, zipping the per-file outputs."""
+    tool = get_tool(payload.tool)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"unknown tool '{payload.tool}'")
+    if tool.min_files != 1 or tool.multi_file:
+        raise HTTPException(status_code=400, detail="batch supports single-file tools only")
+    try:
+        available, reason = tool.available()
+    except Exception:
+        available, reason = False, "availability check failed"
+    if not available:
+        raise HTTPException(status_code=409, detail=f"tool unavailable: {reason or 'unknown'}")
+
+    if len(set(payload.file_ids)) != len(payload.file_ids):
+        raise HTTPException(status_code=400, detail="duplicate file ids")
+    files: list[File] = []
+    for fid in payload.file_ids:
+        f = db.get(File, fid)
+        if f is None or (f.user_id != user.id and not user.is_admin) or f.kind != "upload":
+            raise HTTPException(status_code=404, detail=f"file {fid} not found")
+        if f.job_id is not None:
+            raise HTTPException(status_code=409, detail=f"file '{f.orig_name}' is already used by another job")
+        if f.expires_at is not None and f.expires_at < utcnow():
+            raise HTTPException(status_code=400, detail=f"file '{f.orig_name}' has expired")
+        if tool.accepts:
+            ext = _matched_extension(f.orig_name, tool.accepts)
+            if ext is None:
+                raise HTTPException(status_code=422, detail=f"file '{f.orig_name}' is not accepted by this tool")
+            allowed = ARCHIVE_MIMES.get(ext)
+            if allowed and f.mime not in allowed:
+                raise HTTPException(status_code=422, detail=f"file '{f.orig_name}' content does not match its extension")
+        files.append(f)
+
+    try:
+        jsonschema.validate(instance=payload.params or {}, schema=tool.params_schema)
+    except jsonschema.ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid params: {exc.message}") from None
+
+    job = Job(user_id=user.id, tool=f"batch:{tool.slug}", status="queued", params=_redact_params(payload.params or {}))
+    db.add(job)
+    db.flush()
+    for f in files:
+        f.job_id = job.id
+    db.commit()
+    try:
+        job.rq_job_id = enqueue_batch(job.id, tool.slug, tool.queue, payload.params or {})
+        db.commit()
+    except Exception:
+        logger.exception("failed to enqueue batch %s", job.id)
+        job.status = "error"
+        job.error = "job queue unavailable"
+        job.finished_at = utcnow()
+        db.commit()
+        raise HTTPException(status_code=503, detail="job queue unavailable") from None
+    logger.info("batch job %s (%s x%d) by %s", job.id, tool.slug, len(files), user.username)
+    db.refresh(job)
+    return job_to_schema(job)
+
+
+class PipelineStep(BaseModel):
+    tool: str = Field(min_length=1, max_length=64)
+    params: dict = Field(default_factory=dict)
+
+
+class PipelineCreate(BaseModel):
+    steps: list[PipelineStep] = Field(min_length=1, max_length=12)
+    file_ids: list[UUID] = Field(min_length=1, max_length=1)
+
+
+@router.post("/pipeline", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit(RATE_LIMIT)
+def create_pipeline(
+    request: Request,
+    payload: PipelineCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JobOut:
+    """Run a linear chain of single-file tools; each step's output feeds the next."""
+    # Resolve + validate every step up front so a bad chain fails before it runs.
+    resolved: list[Tool] = []
+    for i, step in enumerate(payload.steps):
+        tool = get_tool(step.tool)
+        if tool is None:
+            raise HTTPException(status_code=404, detail=f"step {i + 1}: unknown tool '{step.tool}'")
+        if tool.min_files != 1 or tool.multi_file:
+            raise HTTPException(
+                status_code=400,
+                detail=f"step {i + 1} ('{tool.name}'): pipelines only support single-file tools",
+            )
+        try:
+            available, reason = tool.available()
+        except Exception:
+            available, reason = False, "availability check failed"
+        if not available:
+            raise HTTPException(status_code=409, detail=f"step {i + 1} ('{tool.name}') unavailable: {reason or 'unknown'}")
+        try:
+            jsonschema.validate(instance=step.params or {}, schema=tool.params_schema)
+        except jsonschema.ValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"step {i + 1}: invalid params: {exc.message}") from None
+        resolved.append(tool)
+
+    # Validate the single input file against the FIRST step's accepts.
+    fid = payload.file_ids[0]
+    f = db.get(File, fid)
+    if f is None or (f.user_id != user.id and not user.is_admin) or f.kind != "upload":
+        raise HTTPException(status_code=404, detail=f"file {fid} not found")
+    if f.job_id is not None:
+        raise HTTPException(status_code=409, detail=f"file '{f.orig_name}' is already used by another job")
+    if f.expires_at is not None and f.expires_at < utcnow():
+        raise HTTPException(status_code=400, detail=f"file '{f.orig_name}' has expired")
+    first = resolved[0]
+    if first.accepts:
+        ext = _matched_extension(f.orig_name, first.accepts)
+        if ext is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"file '{f.orig_name}' is not accepted by the first step ('{first.name}')",
+            )
+        allowed = ARCHIVE_MIMES.get(ext)
+        if allowed and f.mime not in allowed:
+            raise HTTPException(status_code=422, detail=f"file '{f.orig_name}' content does not match its extension")
+
+    # Real steps go to the worker; a password-redacted copy is persisted for display.
+    real_steps = [{"tool": s.tool, "params": s.params or {}} for s in payload.steps]
+    redacted_steps = [{"tool": s.tool, "params": _redact_params(s.params or {})} for s in payload.steps]
+    queue = "heavy" if any(t.queue == "heavy" for t in resolved) else "default"
+
+    labels = "→".join(t.slug for t in resolved)
+    job = Job(user_id=user.id, tool=f"pipeline:{labels}"[:255], status="queued",
+              params={"steps": redacted_steps})
+    db.add(job)
+    db.flush()
+    f.job_id = job.id
+    db.commit()
+    try:
+        job.rq_job_id = enqueue_pipeline(job.id, real_steps, queue)
+        db.commit()
+    except Exception:
+        logger.exception("failed to enqueue pipeline %s", job.id)
+        job.status = "error"
+        job.error = "job queue unavailable"
+        job.finished_at = utcnow()
+        db.commit()
+        raise HTTPException(status_code=503, detail="job queue unavailable") from None
+    logger.info("pipeline job %s (%d steps) by %s", job.id, len(resolved), user.username)
+    db.refresh(job)
     return job_to_schema(job)
 
 

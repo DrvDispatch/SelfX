@@ -187,6 +187,34 @@ export function createJob(
   );
 }
 
+/** Run one single-file tool over many files; outputs come back as one zip. */
+export function createBatchJob(
+  tool: string,
+  fileIds: string[],
+  params: Record<string, unknown>,
+): Promise<Job> {
+  return request<Job>(
+    "/jobs/batch",
+    jsonInit("POST", { tool, file_ids: fileIds, params }),
+  );
+}
+
+export interface PipelineStep {
+  tool: string;
+  params: Record<string, unknown>;
+}
+
+/** Run a linear chain of single-file tools; each step's output feeds the next. */
+export function createPipelineJob(
+  steps: PipelineStep[],
+  fileIds: string[],
+): Promise<Job> {
+  return request<Job>(
+    "/jobs/pipeline",
+    jsonInit("POST", { steps, file_ids: fileIds }),
+  );
+}
+
 export function listJobs(limit = 50, offset = 0): Promise<JobList> {
   return request<JobList>(`/jobs?limit=${limit}&offset=${offset}`);
 }
@@ -237,6 +265,32 @@ export function adminDeleteUser(id: string): Promise<void> {
 
 export function adminListJobs(limit = 50, offset = 0): Promise<JobList> {
   return request<JobList>(`/admin/jobs?limit=${limit}&offset=${offset}`);
+}
+
+// --- presets ---
+
+export interface Preset {
+  id: string;
+  name: string;
+  tool: string;
+  params: Record<string, unknown>;
+  created_at: string;
+}
+
+export function listPresets(): Promise<Preset[]> {
+  return request<Preset[]>("/presets");
+}
+
+export function createPreset(
+  name: string,
+  tool: string,
+  params: Record<string, unknown>,
+): Promise<Preset> {
+  return request<Preset>("/presets", jsonInit("POST", { name, tool, params }));
+}
+
+export function deletePreset(id: string): Promise<void> {
+  return request<void>(`/presets/${id}`, { method: "DELETE" });
 }
 
 // --- knowledge base ---

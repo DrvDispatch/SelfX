@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { Boxes, Search, Sparkles, Upload, X } from "lucide-react";
+import { Boxes, Clock, Search, Sparkles, Star, Upload, X } from "lucide-react";
 import { ApiError, listTools } from "../api";
 import { accentVar, categoryMeta, CATEGORY_ORDER } from "../categories";
 import ToolCard from "../components/ToolCard";
+import { PREFS_EVENT, getFavorites, getRecentTools } from "../prefs";
 import type { ToolInfo } from "../types";
 
 function extsOf(files: File[]): string[] {
@@ -23,6 +24,8 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [drop, setDrop] = useState<{ files: File[]; matches: ToolInfo[] } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [favSlugs, setFavSlugs] = useState<string[]>(() => getFavorites());
+  const [recentSlugs, setRecentSlugs] = useState<string[]>(() => getRecentTools());
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -35,6 +38,35 @@ export default function Dashboard() {
       cancelled = true;
     };
   }, []);
+
+  // Keep favorites/recents in sync as they change (starred here or on a tool page).
+  useEffect(() => {
+    const sync = () => {
+      setFavSlugs(getFavorites());
+      setRecentSlugs(getRecentTools());
+    };
+    window.addEventListener(PREFS_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(PREFS_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  const bySlug = useMemo(() => new Map(tools.map((t) => [t.slug, t])), [tools]);
+  const favTools = useMemo(
+    () => favSlugs.map((s) => bySlug.get(s)).filter((t): t is ToolInfo => t !== undefined),
+    [favSlugs, bySlug],
+  );
+  const recentTools = useMemo(
+    () =>
+      recentSlugs
+        .filter((s) => !favSlugs.includes(s))
+        .map((s) => bySlug.get(s))
+        .filter((t): t is ToolInfo => t !== undefined)
+        .slice(0, 4),
+    [recentSlugs, favSlugs, bySlug],
+  );
 
   const suggest = (files: File[]) => {
     if (!files.length) return;
@@ -155,6 +187,40 @@ export default function Dashboard() {
               })}
             </div>
           )}
+        </section>
+      )}
+
+      {/* Favorites & recents */}
+      {!query && favTools.length > 0 && (
+        <section className="mb-8">
+          <div className="mb-3 flex items-center gap-2.5">
+            <span className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar("img")} 14%, transparent)` }}>
+              <Star className="h-4.5 w-4.5" style={{ color: accentVar("img") }} fill="currentColor" />
+            </span>
+            <h3 className="font-semibold text-fg">Favorites</h3>
+            <span className="text-sm text-faint">{favTools.length}</span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {favTools.map((t) => (
+              <ToolCard key={t.slug} tool={t} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {!query && recentTools.length > 0 && (
+        <section className="mb-8">
+          <div className="mb-3 flex items-center gap-2.5">
+            <span className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar("util")} 14%, transparent)` }}>
+              <Clock className="h-4.5 w-4.5" style={{ color: accentVar("util") }} />
+            </span>
+            <h3 className="font-semibold text-fg">Recent</h3>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {recentTools.map((t) => (
+              <ToolCard key={t.slug} tool={t} />
+            ))}
+          </div>
         </section>
       )}
 

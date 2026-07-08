@@ -49,6 +49,31 @@ def enqueue_job(
     return rq_job.id
 
 
+def enqueue_batch(job_id: uuid.UUID | str, tool_slug: str, queue_name: str = "default",
+                  params: dict | None = None) -> str:
+    """Enqueue app.worker.run_batch(job_id, tool_slug, params) — one tool over many files."""
+    rq_job = get_queue(queue_name).enqueue(
+        "app.worker.run_batch",
+        str(job_id), tool_slug, params or {},
+        job_timeout=settings.job_timeout_seconds,
+        result_ttl=3600, failure_ttl=86400,
+        description=f"selfx batch {job_id}",
+    )
+    return rq_job.id
+
+
+def enqueue_pipeline(job_id: uuid.UUID | str, steps: list[dict], queue_name: str = "default") -> str:
+    """Enqueue app.worker.run_pipeline(job_id, steps) — a linear chain of tools."""
+    rq_job = get_queue(queue_name).enqueue(
+        "app.worker.run_pipeline",
+        str(job_id), steps,
+        job_timeout=settings.job_timeout_seconds,
+        result_ttl=3600, failure_ttl=86400,
+        description=f"selfx pipeline {job_id}",
+    )
+    return rq_job.id
+
+
 def enqueue_kb_ingest(document_id: uuid.UUID | str) -> str:
     """Enqueue knowledge-base ingestion of one document on the heavy queue."""
     rq_job = get_queue("heavy").enqueue(

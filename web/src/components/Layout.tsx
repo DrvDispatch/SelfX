@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { BookOpen, Boxes, LayoutGrid, ListChecks, LogOut, Moon, Search, Shield, Sparkles, Sun } from "lucide-react";
+import { BookOpen, Boxes, ChevronDown, Clipboard, Cpu, Layers, LayoutGrid, ListChecks, LogOut, Moon, Search, Shield, Sparkles, Sun, Workflow, type LucideIcon } from "lucide-react";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
+import { imageFromPasteEvent } from "../clipboard";
 import CommandPalette from "./CommandPalette";
 
 function navClass({ isActive }: { isActive: boolean }): string {
@@ -14,11 +15,21 @@ function navClass({ isActive }: { isActive: boolean }): string {
   ].join(" ");
 }
 
+// Secondary / power-user pages, tucked under the "More" menu so the header never wraps.
+const MORE_ITEMS: { to: string; label: string; icon: LucideIcon; admin?: boolean }[] = [
+  { to: "/batch", label: "Batch", icon: Layers },
+  { to: "/pipeline", label: "Pipeline", icon: Workflow },
+  { to: "/quick-tools", label: "Quick Tools", icon: Boxes },
+  { to: "/models", label: "AI Models", icon: Cpu, admin: true },
+  { to: "/admin", label: "Admin", icon: Shield, admin: true },
+];
+
 export default function Layout() {
   const { user, logout } = useAuth();
   const { resolved, toggle } = useTheme();
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -30,6 +41,23 @@ export default function Layout() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Paste a screenshot ANYWHERE → route it to the Paste page ready to use. Ignore
+  // pastes aimed at editable fields so normal text paste (search, forms, chat) is untouched.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) {
+        return;
+      }
+      const file = imageFromPasteEvent(e);
+      if (!file) return;
+      e.preventDefault();
+      navigate("/paste", { state: { pastedImage: file } });
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [navigate]);
 
   const onLogout = () => {
     logout();
@@ -47,7 +75,7 @@ export default function Layout() {
             Self<span className="text-primary">X</span>
           </NavLink>
 
-          <nav className="ml-3 hidden items-center gap-1 sm:flex">
+          <nav className="ml-3 hidden items-center gap-1 md:flex">
             <NavLink to="/" end className={navClass}>
               <LayoutGrid className="h-4 w-4" /> Tools
             </NavLink>
@@ -57,17 +85,47 @@ export default function Layout() {
             <NavLink to="/knowledge" className={navClass}>
               <BookOpen className="h-4 w-4" /> Knowledge
             </NavLink>
+            <NavLink to="/paste" className={navClass}>
+              <Clipboard className="h-4 w-4" /> Paste
+            </NavLink>
             <NavLink to="/jobs" className={navClass}>
               <ListChecks className="h-4 w-4" /> Jobs
             </NavLink>
-            <NavLink to="/quick-tools" className={navClass}>
-              <Boxes className="h-4 w-4" /> Quick Tools
-            </NavLink>
-            {user?.is_admin && (
-              <NavLink to="/admin" className={navClass}>
-                <Shield className="h-4 w-4" /> Admin
-              </NavLink>
-            )}
+
+            {/* Overflow menu keeps the header from wrapping as features grow */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setMoreOpen((o) => !o)}
+                className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+              >
+                More <ChevronDown className={`h-4 w-4 transition-transform ${moreOpen ? "rotate-180" : ""}`} />
+              </button>
+              {moreOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMoreOpen(false)} />
+                  <div className="absolute right-0 top-full z-20 mt-1.5 w-48 rounded-xl border border-line bg-surface p-1.5 shadow-[var(--shadow-pop)]">
+                    {MORE_ITEMS.filter((it) => !it.admin || user?.is_admin).map((it) => {
+                      const Icon = it.icon;
+                      return (
+                        <NavLink
+                          key={it.to}
+                          to={it.to}
+                          onClick={() => setMoreOpen(false)}
+                          className={({ isActive }) =>
+                            `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors ${
+                              isActive ? "bg-primary-soft text-primary" : "text-fg hover:bg-surface-2"
+                            }`
+                          }
+                        >
+                          <Icon className="h-4 w-4 shrink-0" /> {it.label}
+                        </NavLink>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
           </nav>
 
           <div className="flex-1" />

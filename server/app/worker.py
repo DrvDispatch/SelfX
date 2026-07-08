@@ -3,6 +3,7 @@
 import logging
 import re
 import shutil
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -244,6 +245,186 @@ def run_tool(job_id: str, params: dict | None = None) -> None:
             _mark_failed(jid, f"job exceeded the time limit of {settings.job_timeout_seconds} seconds")
         else:
             _mark_failed(jid, "internal error while running the tool")
+    finally:
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_batch(job_id: str, tool_slug: str, params: dict | None = None) -> None:
+    """Run one single-file tool over every input file, zipping the per-file outputs."""
+    jid = UUID(str(job_id))
+    workdir = None
+    try:
+        with SessionLocal() as db:
+            job = db.get(Job, jid)
+            if job is None or job.status != "queued":
+                return
+            job.status = "running"
+            job.started_at = _utcnow()
+            job.message = "starting batch"
+            db.commit()
+
+            tool = get_tool(tool_slug)
+            if tool is None:
+                raise ToolError(f"unknown tool '{tool_slug}'")
+            inputs = (
+                db.query(File).filter(File.job_id == jid, File.kind == "upload")
+                .order_by(File.created_at).all()
+            )
+            if not inputs:
+                raise ToolError("no input files")
+            effective_params = dict(params) if params is not None else dict(job.params or {})
+
+            workdir = tmp_dir(jid)
+            workdir.mkdir(parents=True, exist_ok=True)
+            out_dir = outputs_dir(jid)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            total = len(inputs)
+            n_ok = 0
+            errors: list[str] = []
+            zip_path = out_dir / f"batch-{tool.slug}.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+                for i, f in enumerate(inputs):
+                    path = file_abs_path(f.stored_path)
+                    _set_progress(jid, i / total, f"{i + 1}/{total}: {f.orig_name}")
+                    if not path.is_file():
+                        errors.append(f"{f.orig_name}: file missing")
+                        continue
+                    sub_w = workdir / f"item{i}" / "work"
+                    sub_o = workdir / f"item{i}" / "out"
+                    sub_w.mkdir(parents=True, exist_ok=True)
+                    sub_o.mkdir(parents=True, exist_ok=True)
+                    ctx = ToolContext(jid, [path], dict(effective_params), sub_w, sub_o, progress_cb=None)
+                    try:
+                        tool.run(ctx)
+                        # Map any "<uuid>*" output names back to the user's filename, just
+                        # like single-file jobs, so no internal id leaks into the zip.
+                        _rename_outputs(sub_o, [f])
+                        nice = _nice_stem(f.orig_name)
+                        for p in sorted(x for x in sub_o.rglob("*") if x.is_file()):
+                            zf.write(p, arcname=f"{nice}/{p.relative_to(sub_o).as_posix()}")
+                        n_ok += 1
+                    except Exception as exc:  # noqa: BLE001 - collect per-file failure, keep going
+                        errors.append(f"{f.orig_name}: {str(exc)[:120]}")
+                    finally:
+                        shutil.rmtree(workdir / f"item{i}", ignore_errors=True)
+
+            if n_ok == 0:
+                raise ToolError("all files failed — " + "; ".join(errors[:3]))
+            max_output_bytes = settings.max_output_mb * 1024 * 1024
+            if zip_path.stat().st_size > max_output_bytes:
+                zip_path.unlink(missing_ok=True)
+                raise ToolError("combined output exceeds the size limit")
+            _register_outputs(db, job)
+            job.status = "done"
+            job.progress = 1.0
+            job.finished_at = _utcnow()
+            job.message = f"{n_ok}/{total} succeeded" + (f", {len(errors)} failed" if errors else "")
+            db.commit()
+            logger.info("batch job %s done (%d/%d ok)", jid, n_ok, total)
+    except ToolError as exc:
+        _mark_failed(jid, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("batch job %s crashed", jid)
+        _mark_failed(jid, "internal error while running the batch")
+    finally:
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_pipeline(job_id: str, steps: list[dict] | None = None) -> None:
+    """Run a linear chain of single-file tools: the output of each step becomes the
+    input of the next. `steps` = [{"tool": slug, "params": {...}}, ...]."""
+    jid = UUID(str(job_id))
+    workdir = None
+    try:
+        with SessionLocal() as db:
+            job = db.get(Job, jid)
+            if job is None or job.status != "queued":
+                return
+            job.status = "running"
+            job.started_at = _utcnow()
+            job.message = "starting pipeline"
+            db.commit()
+
+            chain = steps if steps is not None else (job.params or {}).get("steps") or []
+            if not chain:
+                raise ToolError("pipeline has no steps")
+            inputs = (
+                db.query(File).filter(File.job_id == jid, File.kind == "upload")
+                .order_by(File.created_at).all()
+            )
+            input_paths = [file_abs_path(f.stored_path) for f in inputs]
+            if len(input_paths) != 1:
+                raise ToolError("a pipeline takes exactly one input file")
+            if any(not p.is_file() for p in input_paths):
+                raise ToolError("an input file is no longer available (it may have expired)")
+
+            workdir = tmp_dir(jid)
+            workdir.mkdir(parents=True, exist_ok=True)
+            out_dir = outputs_dir(jid)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            cur_paths = list(input_paths)
+            stage_out: Path | None = None
+            n = len(chain)
+            for i, step in enumerate(chain):
+                slug = step.get("tool")
+                tool = get_tool(slug)
+                if tool is None:
+                    raise ToolError(f"unknown tool '{slug}' in step {i + 1}")
+                if len(cur_paths) != 1:
+                    raise ToolError(
+                        f"step {i} produced {len(cur_paths)} files; each pipeline step takes one file"
+                    )
+                _set_progress(jid, i / n, f"step {i + 1}/{n}: {tool.name}")
+                s_w = workdir / f"stage{i}" / "work"
+                s_o = workdir / f"stage{i}" / "out"
+                s_w.mkdir(parents=True, exist_ok=True)
+                s_o.mkdir(parents=True, exist_ok=True)
+                ctx = ToolContext(jid, list(cur_paths), dict(step.get("params") or {}), s_w, s_o, progress_cb=None)
+                try:
+                    tool.run(ctx)
+                except ToolError as exc:
+                    raise ToolError(f"step {i + 1} ({tool.name}): {exc}") from None
+                except Exception:
+                    logger.exception("pipeline step %d (%s) crashed", i + 1, tool.slug)
+                    raise ToolError(
+                        f"step {i + 1} ({tool.name}) failed — the input may be incompatible with this step"
+                    ) from None
+                outs = sorted(p for p in s_o.rglob("*") if p.is_file())
+                if not outs:
+                    raise ToolError(f"step {i + 1} ({tool.name}) produced no output")
+                cur_paths = outs
+                stage_out = s_o
+
+            # Copy the last stage's outputs into the job output dir (preserving structure).
+            assert stage_out is not None
+            for p in cur_paths:
+                dest = out_dir / p.relative_to(stage_out)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dest)
+
+            max_output_bytes = settings.max_output_mb * 1024 * 1024
+            total = sum(p.stat().st_size for p in out_dir.rglob("*") if p.is_file())
+            if total > max_output_bytes:
+                shutil.rmtree(out_dir, ignore_errors=True)
+                raise ToolError("output exceeds the size limit")
+
+            _rename_outputs(out_dir, inputs)
+            n_outputs = _register_outputs(db, job)
+            job.status = "done"
+            job.progress = 1.0
+            job.finished_at = _utcnow()
+            job.message = f"{n} steps completed"
+            db.commit()
+            logger.info("pipeline job %s done (%d steps, %d output(s))", jid, n, n_outputs)
+    except ToolError as exc:
+        _mark_failed(jid, str(exc))
+    except Exception:  # noqa: BLE001
+        logger.exception("pipeline job %s crashed", jid)
+        _mark_failed(jid, "internal error while running the pipeline")
     finally:
         if workdir is not None:
             shutil.rmtree(workdir, ignore_errors=True)
