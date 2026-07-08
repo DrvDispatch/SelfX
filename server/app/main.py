@@ -27,6 +27,7 @@ from .routes import auth as auth_routes
 from .routes import files as files_routes
 from .routes import jobs as jobs_routes
 from .routes import kb as kb_routes
+from .routes import models as models_routes
 from .routes import tools as tools_routes
 from .storage import ensure_dirs
 from .tools import discover
@@ -116,6 +117,7 @@ app.include_router(jobs_routes.router, prefix=API_PREFIX)
 app.include_router(admin_routes.router, prefix=API_PREFIX)
 app.include_router(kb_routes.router, prefix=API_PREFIX)
 app.include_router(agent_routes.router, prefix=API_PREFIX)
+app.include_router(models_routes.router, prefix=API_PREFIX)
 
 
 @app.get(API_PREFIX + "/healthz")

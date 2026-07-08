@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import Jobs from "./pages/Jobs";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Login from "./pages/Login";
+import Models from "./pages/Models";
 import QuickTools from "./pages/QuickTools";
 import ToolPage from "./pages/ToolPage";
 
@@ -36,6 +37,14 @@ export default function App() {
                 element={
                   <RequireAdmin>
                     <Admin />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="/models"
+                element={
+                  <RequireAdmin>
+                    <Models />
                   </RequireAdmin>
                 }
               />

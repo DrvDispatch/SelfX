@@ -20,6 +20,7 @@ const PAGES: Item[] = [
   { id: "p-kb", label: "Knowledge", sub: "Chat with your documents", to: "/knowledge", icon: BookOpen, accent: "docs" },
   { id: "p-jobs", label: "Jobs", sub: "History & downloads", to: "/jobs", icon: ListChecks, accent: "util" },
   { id: "p-quick", label: "Quick Tools", sub: "In-browser utilities", to: "/quick-tools", icon: Boxes, accent: "quick" },
+  { id: "p-models", label: "AI Models", sub: "Manage Ollama models", to: "/models", icon: Boxes, accent: "media" },
 ];
 
 export default function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {

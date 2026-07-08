@@ -310,3 +310,20 @@ export function agentStatus(): Promise<AgentStatus> {
 export function agentChat(message: string, fileIds: string[], provider?: string): Promise<AgentReply> {
   return request<AgentReply>("/agent/chat", jsonInit("POST", { message, file_ids: fileIds, provider }));
 }
+
+// --- ollama model management (admin) ---
+
+export interface OllamaModel {
+  name: string;
+  size: number;
+  details?: { parameter_size?: string; quantization_level?: string };
+}
+export function listModels(): Promise<{ models: OllamaModel[]; pulling: string[] }> {
+  return request<{ models: OllamaModel[]; pulling: string[] }>("/admin/models");
+}
+export function pullModel(name: string): Promise<{ status: string; name: string }> {
+  return request<{ status: string; name: string }>("/admin/models/pull", jsonInit("POST", { name }));
+}
+export function deleteModel(name: string): Promise<{ deleted: string }> {
+  return request<{ deleted: string }>(`/admin/models/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
