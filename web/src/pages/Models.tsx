@@ -1,20 +1,27 @@
 import { useEffect, useState } from "react";
 import { Boxes, Download, Loader2, Trash2 } from "lucide-react";
-import { deleteModel, listModels, pullModel, type OllamaModel } from "../api";
+import { ApiError, deleteModel, listModels, pullModel, type OllamaModel } from "../api";
+import { RowsSkeleton } from "../components/Skeleton";
+import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ConfirmDialog";
 import { formatBytes } from "../format";
 
 const SUGGESTIONS = ["qwen3:8b", "llama3.2:3b", "moondream", "nomic-embed-text", "bge-m3", "gemma3:4b"];
 
 export default function Models() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [pulling, setPulling] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refresh = () =>
     listModels()
       .then((r) => { setModels(r.models); setPulling(r.pulling); setError(null); })
-      .catch((e) => setError(e instanceof Error ? e.message : "failed"));
+      .catch((e) => setError(e instanceof Error ? e.message : "failed"))
+      .finally(() => setLoading(false));
 
   useEffect(() => { void refresh(); }, []);
   useEffect(() => {
@@ -26,14 +33,24 @@ export default function Models() {
   const pull = async (n: string) => {
     const m = n.trim();
     if (!m) return;
-    await pullModel(m);
-    setName("");
-    void refresh();
+    try {
+      await pullModel(m);
+      setName("");
+      toast.info(`Pulling “${m}” — this can take a while`);
+      void refresh();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.detail : "Couldn't start the pull");
+    }
   };
   const remove = async (n: string) => {
-    if (!confirm(`Delete model ${n}?`)) return;
-    await deleteModel(n);
-    void refresh();
+    if (!(await confirm({ title: `Delete model “${n}”?`, message: "It will be removed from disk; you can re-pull it later.", danger: true, confirmLabel: "Delete" }))) return;
+    try {
+      await deleteModel(n);
+      toast.success(`Model “${n}” deleted`);
+      void refresh();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.detail : "Couldn't delete the model");
+    }
   };
 
   return (
@@ -72,8 +89,11 @@ export default function Models() {
         </div>
       )}
 
+      {loading ? (
+        <RowsSkeleton count={3} />
+      ) : (
       <div className="divide-y divide-line rounded-2xl border border-line bg-surface">
-        {models.length === 0 && <p className="p-4 text-sm text-muted">No models installed yet.</p>}
+        {models.length === 0 && <p className="p-4 text-sm text-muted">No models installed yet — pull one above.</p>}
         {models.map((m) => (
           <div key={m.name} className="flex items-center gap-3 px-4 py-3">
             <div className="min-w-0 flex-1">
@@ -89,6 +109,7 @@ export default function Models() {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, Play, Plus, Trash2, Workflow } from "lucide-react";
-import { ApiError, createPipelineJob, listTools, uploadFile } from "../api";
+import { ApiError, createPipelineJob, listTools, uploadFileWithProgress } from "../api";
 import FileDrop from "../components/FileDrop";
 import ParamsForm from "../components/ParamsForm";
+import { useToast } from "../components/Toast";
 import type { ToolInfo } from "../types";
 
 interface Step {
@@ -21,6 +22,7 @@ function defaultsFor(tool: ToolInfo): Record<string, unknown> {
 
 export default function Pipeline() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -91,7 +93,9 @@ export default function Pipeline() {
     setSubmitting(true);
     try {
       setStatus(`Uploading ${file.name}…`);
-      const info = await uploadFile(file);
+      const info = await uploadFileWithProgress(file, (frac) =>
+        setStatus(`Uploading ${file.name} — ${Math.round(frac * 100)}%`),
+      );
       setStatus("Starting pipeline…");
       const payload = steps.map((s) => {
         const cleaned: Record<string, unknown> = {};
@@ -101,9 +105,12 @@ export default function Pipeline() {
         return { tool: s.slug, params: cleaned };
       });
       const job = await createPipelineJob(payload, [info.id]);
+      toast.success(`Pipeline of ${steps.length} step${steps.length === 1 ? "" : "s"} started`);
       navigate(`/jobs?highlight=${job.id}`);
     } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.detail : "Failed to start pipeline");
+      const detail = e instanceof ApiError ? e.detail : "Failed to start pipeline";
+      setSubmitError(detail);
+      toast.error(detail);
       setSubmitting(false);
       setStatus(null);
     }

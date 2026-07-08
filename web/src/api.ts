@@ -128,6 +128,55 @@ export function uploadFile(file: File): Promise<FileInfo> {
   return request<FileInfo>("/files", { method: "POST", body: form });
 }
 
+/**
+ * Upload a file with progress callbacks (fraction 0..1). Uses XHR so we can
+ * observe upload.onprogress, which fetch() can't do. Returns the same FileInfo.
+ */
+export function uploadFileWithProgress(
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<FileInfo> {
+  return new Promise<FileInfo>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/files`);
+    const token = getToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        handleUnauthorized();
+        reject(new ApiError(401, "Session expired"));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as FileInfo);
+        } catch {
+          reject(new ApiError(xhr.status, "Unexpected server response"));
+        }
+      } else {
+        let detail = `Upload failed (HTTP ${xhr.status})`;
+        try {
+          const body = JSON.parse(xhr.responseText) as { detail?: unknown };
+          if (typeof body.detail === "string") detail = body.detail;
+        } catch {
+          // non-JSON error body
+        }
+        reject(new ApiError(xhr.status, detail));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, "Network error during upload"));
+    xhr.onabort = () => reject(new ApiError(0, "Upload cancelled"));
+    const form = new FormData();
+    form.append("file", file);
+    xhr.send(form);
+  });
+}
+
 /** Fetches a file's bytes with the auth header (for inline previews). */
 export async function fetchFileBlob(id: string): Promise<Blob> {
   const headers = new Headers();

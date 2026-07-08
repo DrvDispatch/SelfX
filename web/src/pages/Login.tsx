@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { ApiError } from "../api";
 import { useAuth } from "../auth";
 
@@ -82,8 +83,9 @@ export default function Login() {
           <button
             type="submit"
             disabled={busy}
-            className="w-full rounded-xl bg-primary px-3 py-2.5 text-sm font-semibold text-primary-fg transition-opacity hover:opacity-90 disabled:opacity-60"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-3 py-2.5 text-sm font-semibold text-primary-fg transition-opacity hover:opacity-90 disabled:opacity-60"
           >
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>

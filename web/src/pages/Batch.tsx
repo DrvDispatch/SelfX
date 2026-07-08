@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, Layers, Play } from "lucide-react";
-import { ApiError, createBatchJob, listTools, uploadFile } from "../api";
+import { ApiError, createBatchJob, listTools, uploadFileWithProgress } from "../api";
 import FileDrop from "../components/FileDrop";
 import ParamsForm from "../components/ParamsForm";
+import { useToast } from "../components/Toast";
 import type { ToolInfo } from "../types";
 
 export default function Batch() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -76,8 +78,10 @@ export default function Batch() {
     try {
       const fileIds: string[] = [];
       for (let i = 0; i < files.length; i++) {
-        setStep(`Uploading ${i + 1}/${files.length}: ${files[i].name}`);
-        const info = await uploadFile(files[i]);
+        setStep(`Uploading ${i + 1}/${files.length}: ${files[i].name}…`);
+        const info = await uploadFileWithProgress(files[i], (frac) =>
+          setStep(`Uploading ${i + 1}/${files.length}: ${files[i].name} — ${Math.round(frac * 100)}%`),
+        );
         fileIds.push(info.id);
       }
       setStep("Starting batch…");
@@ -86,9 +90,12 @@ export default function Batch() {
         if (v !== undefined && v !== "") cleaned[k] = v;
       }
       const job = await createBatchJob(tool.slug, fileIds, cleaned);
+      toast.success(`Batch of ${files.length} started — tracking it in Jobs`);
       navigate(`/jobs?highlight=${job.id}`);
     } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.detail : "Failed to start batch");
+      const detail = e instanceof ApiError ? e.detail : "Failed to start batch";
+      setSubmitError(detail);
+      toast.error(detail);
       setSubmitting(false);
       setStep(null);
     }

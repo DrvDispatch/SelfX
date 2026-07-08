@@ -8,11 +8,13 @@ import {
   deletePreset,
   listPresets,
   listTools,
-  uploadFile,
+  uploadFileWithProgress,
   type Preset,
 } from "../api";
 import FileDrop from "../components/FileDrop";
 import ParamsForm from "../components/ParamsForm";
+import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ConfirmDialog";
 import { addRecentTool } from "../prefs";
 import type { ToolInfo } from "../types";
 
@@ -28,6 +30,8 @@ export default function ToolPage() {
   const { slug } = useParams<{ slug: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const toast = useToast();
+  const confirm = useConfirm();
   // Files carried over from the dashboard's "drop a file → suggested tools" flow.
   const presetFiles = (location.state as { presetFiles?: File[] } | null)?.presetFiles;
   const [tool, setTool] = useState<ToolInfo | null>(null);
@@ -117,19 +121,25 @@ export default function ToolPage() {
     try {
       const fileIds: string[] = [];
       for (let i = 0; i < files.length; i++) {
-        setStep(`Uploading ${i + 1}/${files.length}: ${files[i].name}`);
-        const info = await uploadFile(files[i]);
+        const label = files.length > 1 ? `${i + 1}/${files.length} ` : "";
+        setStep(`Uploading ${label}${files[i].name}…`);
+        const info = await uploadFileWithProgress(files[i], (frac) =>
+          setStep(`Uploading ${label}${files[i].name} — ${Math.round(frac * 100)}%`),
+        );
         fileIds.push(info.id);
       }
-      setStep("Creating job…");
+      setStep("Starting job…");
       const cleaned: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== "") cleaned[k] = v;
       }
       const job = await createJob(tool.slug, fileIds, cleaned);
+      toast.success(`“${tool.name}” started — tracking it in Jobs`);
       navigate(`/jobs?highlight=${job.id}`);
     } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.detail : "Failed to start job");
+      const detail = e instanceof ApiError ? e.detail : "Failed to start job";
+      setSubmitError(detail);
+      toast.error(detail);
       setSubmitting(false);
       setStep(null);
     }
@@ -154,18 +164,23 @@ export default function ToolPage() {
       setPresets((prev) => [created, ...prev.filter((x) => x.id !== created.id)]);
       setSavingPreset(false);
       setPresetName("");
-      setPresetMsg(`Saved "${created.name}"`);
+      setPresetMsg(null);
+      toast.success(`Preset “${created.name}” saved`);
     } catch (e) {
-      setPresetMsg(e instanceof ApiError ? e.detail : "Couldn't save preset");
+      const detail = e instanceof ApiError ? e.detail : "Couldn't save preset";
+      setPresetMsg(detail);
+      toast.error(detail);
     }
   };
 
   const removePreset = async (p: Preset) => {
+    if (!(await confirm({ title: `Delete preset “${p.name}”?`, danger: true, confirmLabel: "Delete" }))) return;
     try {
       await deletePreset(p.id);
       setPresets((prev) => prev.filter((x) => x.id !== p.id));
+      toast.success(`Preset “${p.name}” deleted`);
     } catch {
-      setPresetMsg("Couldn't delete preset");
+      toast.error("Couldn't delete preset");
     }
   };
 

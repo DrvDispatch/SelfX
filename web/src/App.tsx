@@ -1,6 +1,8 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, RequireAdmin, RequireAuth } from "./auth";
 import { ThemeProvider } from "./theme";
+import { ToastProvider } from "./components/Toast";
+import { ConfirmProvider } from "./components/ConfirmDialog";
 import Layout from "./components/Layout";
 import Admin from "./pages/Admin";
 import Agent from "./pages/Agent";
@@ -18,6 +20,8 @@ import ToolPage from "./pages/ToolPage";
 export default function App() {
   return (
     <ThemeProvider>
+      <ToastProvider>
+        <ConfirmProvider>
       <BrowserRouter>
         <AuthProvider>
           <Routes>
@@ -59,6 +63,8 @@ export default function App() {
           </Routes>
         </AuthProvider>
       </BrowserRouter>
+        </ConfirmProvider>
+      </ToastProvider>
     </ThemeProvider>
   );
 }

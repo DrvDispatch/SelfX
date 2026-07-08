@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BookOpen, FileText, Loader2, Plus, Send, Trash2, Upload } from "lucide-react";
 import {
+  ApiError,
   kbAddDocuments,
   kbChat,
   kbCreateCollection,
@@ -8,15 +9,19 @@ import {
   kbListCollections,
   kbListDocuments,
   kbMessages,
-  uploadFile,
+  uploadFileWithProgress,
   type Citation,
   type KbCollection,
   type KbDocument,
 } from "../api";
+import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ConfirmDialog";
 
 interface Msg { role: string; content: string; citations: Citation[]; }
 
 export default function KnowledgeBase() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [cols, setCols] = useState<KbCollection[]>([]);
   const [sel, setSel] = useState<KbCollection | null>(null);
   const [docs, setDocs] = useState<KbDocument[]>([]);
@@ -52,20 +57,45 @@ export default function KnowledgeBase() {
 
   const create = async () => {
     if (!newName.trim()) return;
-    const c = await kbCreateCollection(newName.trim());
-    setNewName("");
-    await refreshCols();
-    openCollection(c);
+    try {
+      const c = await kbCreateCollection(newName.trim());
+      setNewName("");
+      await refreshCols();
+      openCollection(c);
+      toast.success(`Collection “${c.name}” created`);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.detail : "Couldn't create collection");
+    }
   };
 
   const addFiles = async (fl: FileList | File[]) => {
     if (!sel) return;
+    const list = Array.from(fl);
     setBusy(true);
+    const tid = toast.loading(`Uploading ${list.length} document${list.length === 1 ? "" : "s"}…`);
     try {
       const ids: string[] = [];
-      for (const f of Array.from(fl)) ids.push((await uploadFile(f)).id);
-      const added = await kbAddDocuments(sel.id, ids);
-      setDocs((d) => [...d, ...added]);
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        try {
+          const info = await uploadFileWithProgress(f, (frac) =>
+            toast.update(tid, { message: `Uploading ${f.name} — ${Math.round(frac * 100)}% (${i + 1}/${list.length})` }),
+          );
+          ids.push(info.id);
+        } catch (e) {
+          toast.error(`${f.name}: ${e instanceof ApiError ? e.detail : "upload failed"}`);
+        }
+      }
+      if (ids.length) {
+        const added = await kbAddDocuments(sel.id, ids);
+        setDocs((d) => [...d, ...added]);
+        toast.update(tid, { kind: "success", message: `Added ${ids.length} document${ids.length === 1 ? "" : "s"} — indexing…`, duration: 3500 });
+        void refreshCols();
+      } else {
+        toast.dismiss(tid);
+      }
+    } catch (e) {
+      toast.update(tid, { kind: "error", message: e instanceof ApiError ? e.detail : "Couldn't add documents", duration: 6000 });
     } finally {
       setBusy(false);
     }
@@ -88,9 +118,15 @@ export default function KnowledgeBase() {
   };
 
   const del = async (c: KbCollection) => {
-    await kbDeleteCollection(c.id);
-    if (sel?.id === c.id) setSel(null);
-    await refreshCols();
+    if (!(await confirm({ title: `Delete “${c.name}”?`, message: `${c.documents} document(s) and their embeddings will be removed.`, danger: true, confirmLabel: "Delete" }))) return;
+    try {
+      await kbDeleteCollection(c.id);
+      if (sel?.id === c.id) setSel(null);
+      await refreshCols();
+      toast.success(`Collection “${c.name}” deleted`);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.detail : "Couldn't delete collection");
+    }
   };
 
   return (

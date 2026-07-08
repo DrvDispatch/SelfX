@@ -15,6 +15,8 @@ import {
   adminUpdateUser,
 } from "../api";
 import { useAuth } from "../auth";
+import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ConfirmDialog";
 import { formatBytes } from "../format";
 import type { AdminStats, User } from "../types";
 
@@ -71,6 +73,8 @@ function StatusBadge({ status, count }: { status: string; count?: ReactNode }) {
 
 export default function Admin() {
   const { user: currentUser } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -94,13 +98,16 @@ export default function Admin() {
     void load();
   }, [load]);
 
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>, ok?: string) => {
     setError(null);
     try {
       await action();
       await load();
+      if (ok) toast.success(ok);
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : "Action failed");
+      const detail = e instanceof ApiError ? e.detail : "Action failed";
+      setError(detail);
+      toast.error(detail);
     }
   };
 
@@ -108,7 +115,7 @@ export default function Admin() {
     e.preventDefault();
     if (creating || !newUsername.trim() || !newPassword) return;
     setCreating(true);
-    await run(() => adminCreateUser(newUsername.trim(), newPassword, newIsAdmin));
+    await run(() => adminCreateUser(newUsername.trim(), newPassword, newIsAdmin), `User “${newUsername.trim()}” created`);
     setCreating(false);
     setNewUsername("");
     setNewPassword("");
@@ -118,7 +125,12 @@ export default function Admin() {
   const resetPassword = (u: User) => {
     const pw = window.prompt(`New password for ${u.username}:`);
     if (!pw) return;
-    void run(() => adminUpdateUser(u.id, { password: pw }));
+    void run(() => adminUpdateUser(u.id, { password: pw }), `Password reset for ${u.username}`);
+  };
+
+  const deleteUser = async (u: User) => {
+    if (!(await confirm({ title: `Delete user “${u.username}”?`, message: "This permanently removes the account.", danger: true, confirmLabel: "Delete" }))) return;
+    void run(() => adminDeleteUser(u.id), `User “${u.username}” deleted`);
   };
 
   const jobsByStatus = Object.entries(stats?.jobs_by_status ?? {});
@@ -229,8 +241,9 @@ export default function Admin() {
                           type="button"
                           disabled={isSelf}
                           onClick={() =>
-                            void run(() =>
-                              adminUpdateUser(u.id, { is_admin: !u.is_admin }),
+                            void run(
+                              () => adminUpdateUser(u.id, { is_admin: !u.is_admin }),
+                              u.is_admin ? `${u.username} is no longer an admin` : `${u.username} is now an admin`,
                             )
                           }
                           className={`${rowBtn} text-fg`}
@@ -241,8 +254,9 @@ export default function Admin() {
                           type="button"
                           disabled={isSelf}
                           onClick={() =>
-                            void run(() =>
-                              adminUpdateUser(u.id, { disabled: !u.disabled }),
+                            void run(
+                              () => adminUpdateUser(u.id, { disabled: !u.disabled }),
+                              u.disabled ? `${u.username} enabled` : `${u.username} disabled`,
                             )
                           }
                           className={`${rowBtn} text-warn`}
@@ -252,11 +266,7 @@ export default function Admin() {
                         <button
                           type="button"
                           disabled={isSelf}
-                          onClick={() => {
-                            if (window.confirm(`Delete user ${u.username}?`)) {
-                              void run(() => adminDeleteUser(u.id));
-                            }
-                          }}
+                          onClick={() => void deleteUser(u)}
                           className={`${rowBtn} text-danger`}
                         >
                           Delete

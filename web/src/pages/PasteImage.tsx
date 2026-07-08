@@ -27,6 +27,7 @@ import {
   screenshotName,
   withImageExt,
 } from "../clipboard";
+import { useToast } from "../components/Toast";
 import { formatBytes } from "../format";
 import type { ToolInfo } from "../types";
 
@@ -54,6 +55,7 @@ const ACTIONS: QuickAction[] = [
 export default function PasteImage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const toast = useToast();
   const [img, setImg] = useState<File | null>(null);
   const [name, setName] = useState("");
   const [url, setUrl] = useState<string | null>(null);
@@ -126,6 +128,7 @@ export default function PasteImage() {
     document.body.appendChild(a);
     a.click();
     a.remove();
+    toast.success(`Saved ${currentFile.name}`);
   };
 
   const runTool = (slug: string) => {

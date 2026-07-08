@@ -4,6 +4,7 @@ import { Boxes, Clock, Search, Sparkles, Star, Upload, X } from "lucide-react";
 import { ApiError, listTools } from "../api";
 import { accentVar, categoryMeta, CATEGORY_ORDER } from "../categories";
 import ToolCard from "../components/ToolCard";
+import { CardGridSkeleton } from "../components/Skeleton";
 import { PREFS_EVENT, getFavorites, getRecentTools } from "../prefs";
 import type { ToolInfo } from "../types";
 
@@ -242,6 +243,7 @@ export default function Dashboard() {
       {error && (
         <p className="rounded-xl border border-line bg-surface px-3 py-2 text-sm text-danger">{error}</p>
       )}
+      {loading && <CardGridSkeleton count={12} />}
       {!loading && !error && grouped.length === 0 && (
         <p className="text-sm text-muted">No tools match your search.</p>
       )}
