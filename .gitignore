@@ -41,3 +41,5 @@ transcripts/
 *scratchpad*
 *AppData*
 *Temp?claude*
+
+deploy/portproxy_setup.log
