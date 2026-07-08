@@ -64,10 +64,13 @@ class SubtitleConvert(Tool):
 
         out = ctx.output_dir / f"{src.stem}.{to}"
         ctx.progress(0.4, f"converting to {to}")
+        # Pin the muxer explicitly so an unusual output path can't mislead ffmpeg's
+        # extension-based format guess (reliability). Maps to ffmpeg format names.
+        muxer = {"srt": "srt", "vtt": "webvtt", "ass": "ass"}[to]
         try:
             ctx.run_cmd([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-i", str(source), str(out),
+                "-i", str(source), "-f", muxer, str(out),
             ])
         except ToolError:
             raise ToolError(

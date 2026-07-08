@@ -31,8 +31,46 @@ class SubtitleSync(Tool):
                 "description": "Override the detected subtitle charset (e.g. cp1256, cp1251, gbk). Leave blank to auto-detect.",
                 "default": "",
                 "maxLength": 32,
-            }
+            },
+            "gss": {
+                "type": "boolean",
+                "title": "Robust search (large offsets)",
+                "description": "Use golden-section search — more robust when the offset is large or unknown. Slightly slower.",
+                "default": False,
+            },
+            "max_offset_seconds": {
+                "type": "integer",
+                "title": "Max offset (seconds)",
+                "description": "Largest shift the aligner may apply. 0 keeps the engine default (60s).",
+                "minimum": 0,
+                "maximum": 3600,
+                "default": 0,
+            },
+            "vad": {
+                "type": "string",
+                "title": "Speech detector",
+                "description": "Voice-activity detector used to find speech. 'silero' is often more accurate than the default. Leave as 'default' to keep the engine default.",
+                "enum": [
+                    "default",
+                    "webrtc",
+                    "silero",
+                    "auditok",
+                    "subs_then_webrtc",
+                    "subs_then_silero",
+                    "subs_then_auditok",
+                ],
+                "default": "default",
+            },
         },
+    }
+
+    _VAD_CHOICES = {
+        "webrtc",
+        "silero",
+        "auditok",
+        "subs_then_webrtc",
+        "subs_then_silero",
+        "subs_then_auditok",
     }
 
     def available(self) -> tuple[bool, str | None]:
@@ -70,6 +108,21 @@ class SubtitleSync(Tool):
             # Handle non-UTF-8 subs (CP1256/CP1251/GBK/…) and normalize output.
             argv += ["--encoding", enc]
         argv += ["--output-encoding", "utf-8"]
+
+        # Optional alignment tuning (all opt-in; defaults reproduce prior behavior).
+        if bool(ctx.params.get("gss", False)):
+            argv += ["--gss"]
+        try:
+            max_off = int(ctx.params.get("max_offset_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            max_off = 0
+        max_off = max(0, min(max_off, 3600))
+        if max_off > 0:
+            argv += ["--max-offset-seconds", str(max_off)]
+        vad = str(ctx.params.get("vad", "default") or "default").strip().lower()
+        if vad in self._VAD_CHOICES:
+            argv += ["--vad", vad]
+
         ctx.run_cmd(argv, timeout=min(settings.job_timeout_seconds, 600))
         if not out.is_file() or out.stat().st_size == 0:
             raise ToolError("could not synchronize — the audio may lack clear speech")

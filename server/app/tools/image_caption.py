@@ -36,7 +36,36 @@ class ImageCaption(Tool):
                 "description": "What to ask about the image",
                 "default": "Describe this image in one or two sentences.",
                 "maxLength": 500,
-            }
+            },
+            "model": {
+                "type": "string",
+                "title": "Vision model",
+                "description": (
+                    "Ollama vision model to use; leave blank for the default "
+                    "(moondream). Any other model must already be pulled."
+                ),
+                "maxLength": 100,
+            },
+            "system": {
+                "type": "string",
+                "title": "System prompt",
+                "description": "Optional system instruction (e.g. 'reply as alt-text only')",
+                "maxLength": 1000,
+            },
+            "temperature": {
+                "type": "number",
+                "title": "Temperature",
+                "description": "Higher = more creative; leave blank for the model default",
+                "minimum": 0,
+                "maximum": 2,
+            },
+            "num_predict": {
+                "type": "integer",
+                "title": "Max tokens",
+                "description": "Cap the response length; leave blank for the model default",
+                "minimum": 1,
+                "maximum": 4096,
+            },
         },
     }
 
@@ -54,6 +83,7 @@ class ImageCaption(Tool):
 
     def run(self, ctx: ToolContext) -> None:
         prompt = str(ctx.params.get("prompt", "Describe this image in one or two sentences."))
+        model = str(ctx.params.get("model") or "").strip() or _VISION_MODEL
         src = ctx.input_paths[0]
         # normalise + downscale to a small RGB JPEG before base64 (EXIF-correct,
         # bomb-guarded, ~100x smaller payload than sending the raw upload)
@@ -62,12 +92,38 @@ class ImageCaption(Tool):
         img.save(buf, "JPEG", quality=90)
         img.close()
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        payload: dict = {
+            "model": model,
+            "prompt": prompt,
+            "images": [b64],
+            "stream": False,
+            "keep_alive": settings.ollama_keep_alive,
+        }
+        system = str(ctx.params.get("system") or "").strip()
+        if system:
+            payload["system"] = system
+        options: dict = {}
+        temperature = ctx.params.get("temperature")
+        if temperature is not None:
+            try:
+                options["temperature"] = max(0.0, min(2.0, float(temperature)))
+            except (TypeError, ValueError):
+                pass
+        num_predict = ctx.params.get("num_predict")
+        if num_predict is not None:
+            try:
+                options["num_predict"] = max(1, min(4096, int(num_predict)))
+            except (TypeError, ValueError):
+                pass
+        if options:
+            payload["options"] = options
+
         ctx.progress(0.4, "describing image with local AI")
         try:
             r = httpx.post(
                 f"{settings.ollama_url}/api/generate",
-                json={"model": _VISION_MODEL, "prompt": prompt, "images": [b64],
-                      "stream": False, "keep_alive": settings.ollama_keep_alive},
+                json=payload,
                 timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
             )
         except httpx.HTTPError:

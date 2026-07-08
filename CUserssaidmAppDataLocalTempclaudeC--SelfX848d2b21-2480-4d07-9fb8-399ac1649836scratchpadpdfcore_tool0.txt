@@ -1,0 +1,45 @@
+{
+  "slug": "pdf-merge",
+  "name": "Merge PDFs",
+  "engine": "pikepdf (Python bindings over the QPDF C++ library)",
+  "how_it_works": "run() creates an empty pikepdf.Pdf via pikepdf.new(), then iterates ctx.input_paths in upload order. For each it calls pikepdf.open(path) (catching PasswordError -> 'password-protected' ToolError and PdfError -> 'not a valid PDF', both indexed by input #), appends the source to a `sources` list kept open, and does merged.pages.extend(src.pages) to copy every page. It deliberately keeps ALL source handles open until after save, because pikepdf/QPDF copies indirect shared resources (fonts, XObjects) lazily and closing early corrupts output. Guards len(merged.pages)==0 -> error. Saves to output_dir/'merged.pdf' (fixed name) with plain merged.save() (no flags). finally: closes every source and the merged pdf. progress() steps index/total during the loop, 0.95 before write, 1.0 at end.",
+  "accepts_and_output": "accepts=['.pdf'], multi_file=True, min_files=2. Output: single output_dir/merged.pdf (fixed filename).",
+  "current_limits": "Fixed output name 'merged.pdf' (no derivation from inputs). No dedup/optimization: merging N files that share identical fonts/images does NOT de-duplicate those objects, so merged size can exceed sum of inputs. save() passes no linearize/compression/object-stream flags. Password-protected inputs hard-fail with no password param. No bookmark/outline merging (QPDF copies page tree but the tool never copies /Outlines, so combined TOC is lost). No page-range-per-file selection (all-or-nothing). No cap on file count or total size. Keeping all sources open holds memory proportional to total input size for large batches.",
+  "optimizations": [
+    {
+      "dimension": "support",
+      "idea": "Accept a per-file page selection and an optional output name",
+      "impact": "medium",
+      "effort": "medium",
+      "how": "Extend params_schema with an optional pages spec per input (reuse pdf_split._parse_pages) so users can merge 'file1:1-3, file2:all'; derive output name from first input stem instead of hardcoded 'merged.pdf'."
+    },
+    {
+      "dimension": "accuracy",
+      "idea": "Preserve bookmarks/outlines and metadata when combining",
+      "impact": "medium",
+      "effort": "medium",
+      "how": "After extending pages, rebuild the merged /Outlines from each source's pdf.open_outline(), and copy docinfo/XMP. Currently the combined document silently loses every source's TOC."
+    },
+    {
+      "dimension": "speed",
+      "idea": "De-duplicate shared objects and linearize on save",
+      "impact": "medium",
+      "effort": "low",
+      "how": "Call merged.save(path, linearize=True) and, on modern pikepdf/qpdf, enable object-stream generation (object_stream_mode=pikepdf.ObjectStreamMode.generate). This shrinks and web-optimizes the merged file; combined with recompress_flate=True on newer pikepdf it reclaims size from font/image duplication."
+    },
+    {
+      "dimension": "reliability",
+      "idea": "Bound memory/handles for large batches",
+      "impact": "low",
+      "effort": "medium",
+      "how": "For very large merges, spill to a temp Pdf and close sources in windows, or stream via qpdf --empty --pages; today every source stays open simultaneously (required by current lazy-copy approach) so a 100-file merge holds all handles/memory at once."
+    },
+    {
+      "dimension": "upgrade",
+      "idea": "Stay on pikepdf but exploit newer QPDF",
+      "impact": "low",
+      "effort": "low",
+      "how": "pikepdf 13.x (wraps qpdf 11/12) adds save flags like recompress_flate and better object-stream control. Pin/upgrade pikepdf to gain these; no engine swap needed \u2014 pikepdf/qpdf is already the strongest Python merge engine."
+    }
+  ]
+}

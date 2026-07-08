@@ -29,7 +29,8 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3:8b"
     # Context window (in tokens) passed to Ollama as options.num_ctx on chat/embed.
     # Ollama's built-in default is only 2048, which silently left-truncates long prompts.
-    ollama_num_ctx: int = 8192
+    # 16k so doc-qa / summarize actually fit their retrieved/stuffed context (audit finding).
+    ollama_num_ctx: int = 16384
     # How long Ollama keeps a model in (V)RAM after a request. "0" unloads immediately;
     # a short idle like "30s"/"2m" stays warm for follow-ups then frees the GPU when idle.
     ollama_keep_alive: str = "30s"

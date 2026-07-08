@@ -24,11 +24,25 @@ class SubtitleExtract(Tool):
             "track": {
                 "type": "integer",
                 "title": "Track number",
-                "description": "Which subtitle track (0 = first)",
+                "description": "Which subtitle track (0 = first). Ignored when a language is given.",
                 "minimum": 0,
                 "maximum": 30,
                 "default": 0,
-            }
+            },
+            "language": {
+                "type": "string",
+                "title": "Language",
+                "description": "Pick the track by language tag (e.g. eng, ara, ger). Leave blank to use the track number.",
+                "default": "",
+                "maxLength": 12,
+            },
+            "format": {
+                "type": "string",
+                "title": "Output format",
+                "description": "Text subtitle format to write. ASS preserves styling when the source track is ASS.",
+                "enum": ["srt", "ass", "vtt"],
+                "default": "srt",
+            },
         },
     }
 
@@ -42,7 +56,7 @@ class SubtitleExtract(Tool):
         try:
             proc = ctx.run_cmd([
                 "ffprobe", "-v", "error", "-select_streams", "s",
-                "-show_entries", "stream=index,codec_name,codec_type",
+                "-show_entries", "stream=index,codec_name,codec_type:stream_tags=language,title",
                 "-of", "json", str(src),
             ])
             data = json.loads(proc.stdout or "{}")
@@ -54,8 +68,12 @@ class SubtitleExtract(Tool):
 
     def run(self, ctx: ToolContext) -> None:
         track = int(ctx.params.get("track", 0))
+        language = str(ctx.params.get("language", "") or "").strip().lower()
+        fmt = str(ctx.params.get("format", "srt") or "srt").strip().lower()
+        if fmt not in ("srt", "ass", "vtt"):
+            fmt = "srt"
         src = ctx.input_paths[0]
-        out = ctx.output_dir / f"{src.stem}.srt"
+        out = ctx.output_dir / f"{src.stem}.{fmt}"
         ctx.progress(0.3, "inspecting subtitle tracks")
 
         # Probe first so we can give an ACCURATE, actionable error instead of the
@@ -65,6 +83,25 @@ class SubtitleExtract(Tool):
             n = len(streams)
             if n == 0:
                 raise ToolError("no subtitle tracks were found in this video")
+            # Language selection overrides the track index when requested. The
+            # position within the subtitle-only stream list IS the -map 0:s:N index.
+            if language:
+                match = None
+                for i, s in enumerate(streams):
+                    tags = s.get("tags") or {}
+                    lang = str(tags.get("language", "")).lower()
+                    if lang == language:
+                        match = i
+                        break
+                if match is None:
+                    avail = ", ".join(
+                        str((s.get("tags") or {}).get("language", "und")) for s in streams
+                    )
+                    raise ToolError(
+                        f"no subtitle track tagged language '{language}' — "
+                        f"available: {avail}"
+                    )
+                track = match
             if track >= n:
                 raise ToolError(
                     f"track {track} does not exist — this video has "

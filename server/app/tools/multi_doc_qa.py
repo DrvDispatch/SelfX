@@ -50,6 +50,38 @@ class MultiDocQa(Tool):
                 "maximum": 20,
                 "default": 6,
             },
+            "chunk_size": {
+                "type": "integer",
+                "title": "Chunk size (characters)",
+                "description": "How large each indexed passage is.",
+                "minimum": 200,
+                "maximum": 8000,
+                "default": 1500,
+            },
+            "chunk_overlap": {
+                "type": "integer",
+                "title": "Chunk overlap (characters)",
+                "description": "Characters shared between neighbouring chunks so answers spanning a boundary aren't lost.",
+                "minimum": 0,
+                "maximum": 2000,
+                "default": 200,
+            },
+            "min_score": {
+                "type": "number",
+                "title": "Minimum similarity",
+                "description": "Drop retrieved passages below this cosine score (0 disables filtering).",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "default": 0.0,
+            },
+            "max_chunks": {
+                "type": "integer",
+                "title": "Max passages to index",
+                "description": "Safety cap on how many passages are embedded per job.",
+                "minimum": 10,
+                "maximum": 2000,
+                "default": 200,
+            },
         },
         "required": ["question"],
     }
@@ -68,13 +100,33 @@ class MultiDocQa(Tool):
         question = str(ctx.params["question"]).strip()
         top_k = int(ctx.params.get("top_k", 6))
 
+        # Opt-in retrieval controls — clamped so bad input can't break the job.
+        def _clamp_int(key, default, lo, hi):
+            try:
+                v = int(ctx.params.get(key, default))
+            except (TypeError, ValueError):
+                v = default
+            return max(lo, min(v, hi))
+
+        chunk_size = _clamp_int("chunk_size", 1500, 200, 8000)
+        chunk_overlap = _clamp_int("chunk_overlap", 200, 0, 2000)
+        # Guarantee forward progress in _chunk (step = size - overlap must be > 0).
+        if chunk_overlap >= chunk_size:
+            chunk_overlap = chunk_size - 1
+        max_chunks = _clamp_int("max_chunks", _MAX_CHUNKS, 10, 2000)
+        try:
+            min_score = float(ctx.params.get("min_score", 0.0))
+        except (TypeError, ValueError):
+            min_score = 0.0
+        min_score = max(0.0, min(min_score, 1.0))
+
         ctx.progress(0.1, "extracting text")
         # Collect chunks per document so the global cap can be shared fairly across
         # files instead of being filled by the first documents (ordering bias).
         per_doc: list[tuple[str, list[str]]] = []
         for path in ctx.input_paths:
             text, _ = extract_text(path, max_chars=200_000)
-            chunks = _chunk(text)
+            chunks = _chunk(text, size=chunk_size, overlap=chunk_overlap)
             if chunks:
                 per_doc.append((path.stem, chunks))
         if not per_doc:
@@ -83,13 +135,13 @@ class MultiDocQa(Tool):
         # Round-robin across documents so later files are not dropped entirely.
         passages: list[tuple[str, str]] = []
         depth = 0
-        while len(passages) < _MAX_CHUNKS:
+        while len(passages) < max_chunks:
             added = False
             for name, chunks in per_doc:
                 if depth < len(chunks):
                     added = True
                     passages.append((name, chunks[depth]))
-                    if len(passages) >= _MAX_CHUNKS:
+                    if len(passages) >= max_chunks:
                         break
             if not added:
                 break
@@ -112,7 +164,13 @@ class MultiDocQa(Tool):
         mat_n = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-8)
         qn = qv / (np.linalg.norm(qv) + 1e-8)
         sims = mat_n @ qn
-        top = sims.argsort()[::-1][:top_k]
+        order = sims.argsort()[::-1]
+        top = order[:top_k]
+        if min_score > 0.0:
+            # Drop weak matches, but always keep at least the single best passage so
+            # the model still has something to ground on.
+            kept = [int(i) for i in top if float(sims[int(i)]) >= min_score]
+            top = kept if kept else [int(order[0])]
         context = "\n\n".join(f"[{passages[i][0]}]\n{passages[i][1]}" for i in top)
 
         ctx.progress(0.85, "answering from the retrieved passages")

@@ -4,6 +4,21 @@ from ._media import guard_output_size, validate_time
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
+# libx264 -preset choices, exposed so a CPU-bound user can trade speed for size.
+_X264_SPEEDS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
+                "medium", "slow", "slower", "veryslow"]
+
+
+def _to_seconds(value: str) -> float:
+    """Convert an already-validated time string (seconds or [HH:]MM:SS[.ms]) to seconds."""
+    value = value.strip()
+    if ":" in value:
+        secs = 0.0
+        for part in value.split(":"):
+            secs = secs * 60 + float(part or 0)
+        return secs
+    return float(value or 0)
+
 
 @register
 class VideoTrim(Tool):
@@ -31,6 +46,12 @@ class VideoTrim(Tool):
                 "minimum": 0.1,
                 "maximum": 86400,
             },
+            "end": {
+                "type": "string",
+                "title": "End (alternative to duration)",
+                "description": "End time (seconds or HH:MM:SS). Used only when Duration is blank.",
+                "maxLength": 12,
+            },
             "copy": {
                 "type": "boolean",
                 "title": "Fast lossless cut",
@@ -38,15 +59,39 @@ class VideoTrim(Tool):
                                "snap to the nearest keyframe so the start may be slightly off).",
                 "default": False,
             },
+            "crf": {
+                "type": "integer",
+                "title": "Quality (CRF)",
+                "description": "Lower = better/larger. Only used when re-encoding (0-51).",
+                "minimum": 0,
+                "maximum": 51,
+            },
+            "speed": {
+                "type": "string",
+                "title": "Encoder speed",
+                "description": "Faster = quicker encode, larger file. Only used when re-encoding.",
+                "enum": _X264_SPEEDS,
+            },
         },
-        "required": ["duration"],
+        "required": [],
     }
 
     def run(self, ctx: ToolContext) -> None:
         start = validate_time(ctx.params.get("start", "0"), "start")
-        duration = float(ctx.params["duration"])
         src = ctx.input_paths[0]
         copy = bool(ctx.params.get("copy", False))
+
+        # Duration wins; otherwise derive it from an explicit end time.
+        raw_duration = ctx.params.get("duration")
+        if raw_duration not in (None, ""):
+            duration = float(raw_duration)
+        elif ctx.params.get("end") not in (None, ""):
+            end = validate_time(ctx.params.get("end"), "end")
+            duration = _to_seconds(end) - _to_seconds(start)
+            if duration <= 0:
+                raise ToolError("the end time must be after the start time")
+        else:
+            raise ToolError("please set a duration (or an end time)")
 
         if copy:
             # Keyframe-aligned stream copy: instant + lossless, keep the source container.
@@ -54,8 +99,14 @@ class VideoTrim(Tool):
             enc = ["-c", "copy", "-avoid_negative_ts", "make_zero"]
         else:
             out = ctx.output_dir / f"{src.stem}-clip.mp4"
-            enc = ["-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac",
-                   "-movflags", "+faststart"]
+            speed = str(ctx.params.get("speed") or "veryfast")
+            if speed not in _X264_SPEEDS:
+                speed = "veryfast"
+            enc = ["-c:v", "libx264", "-preset", speed]
+            crf = ctx.params.get("crf")
+            if crf not in (None, ""):
+                enc += ["-crf", str(int(crf))]
+            enc += ["-c:a", "aac", "-movflags", "+faststart"]
 
         ctx.progress(0.3, "trimming")
         ctx.run_cmd([

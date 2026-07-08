@@ -41,7 +41,46 @@ class ImageRemoveBg(Tool):
                 "description": "u2net = general, isnet-general-use = higher quality",
                 "enum": ["u2net", "isnet-general-use", "u2netp", "silueta"],
                 "default": "u2net",
-            }
+            },
+            "alpha_matting": {
+                "type": "boolean",
+                "title": "Refine edges (alpha matting)",
+                "description": "Cleaner hair/fur edges at extra CPU cost",
+                "default": False,
+            },
+            "alpha_matting_foreground_threshold": {
+                "type": "integer",
+                "title": "Foreground threshold",
+                "description": "Alpha-matting foreground cutoff (0-255)",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 240,
+            },
+            "alpha_matting_background_threshold": {
+                "type": "integer",
+                "title": "Background threshold",
+                "description": "Alpha-matting background cutoff (0-255)",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 10,
+            },
+            "alpha_matting_erode_size": {
+                "type": "integer",
+                "title": "Edge erode size",
+                "description": "Alpha-matting erosion radius in px",
+                "minimum": 0,
+                "maximum": 40,
+                "default": 10,
+            },
+            "full_resolution": {
+                "type": "boolean",
+                "title": "Keep full resolution",
+                "description": (
+                    "Detect at reduced size for speed but apply the mask to the "
+                    "original full-resolution pixels"
+                ),
+                "default": False,
+            },
         },
     }
 
@@ -53,16 +92,50 @@ class ImageRemoveBg(Tool):
             return False, "the background-removal engine (rembg) is not installed"
 
     def run(self, ctx: ToolContext) -> None:
+        from PIL import Image
         from rembg import remove
 
+        def _clamp(val: object, lo: int, hi: int, default: int) -> int:
+            try:
+                return max(lo, min(hi, int(val)))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return default
+
         model = str(ctx.params.get("model", "u2net"))
+        alpha_matting = bool(ctx.params.get("alpha_matting", False))
+        full_res = bool(ctx.params.get("full_resolution", False))
         src = ctx.input_paths[0]
         # EXIF-correct, bomb-guarded load; downscale huge inputs to bound CPU/memory
-        img = downscale_max(load_image(src), _MAX_DIM)
+        orig = load_image(src)
+        work = downscale_max(orig, _MAX_DIM)
+
+        remove_kw: dict = {}
+        if alpha_matting:
+            remove_kw.update(
+                alpha_matting=True,
+                alpha_matting_foreground_threshold=_clamp(
+                    ctx.params.get("alpha_matting_foreground_threshold"), 0, 255, 240
+                ),
+                alpha_matting_background_threshold=_clamp(
+                    ctx.params.get("alpha_matting_background_threshold"), 0, 255, 10
+                ),
+                alpha_matting_erode_size=_clamp(
+                    ctx.params.get("alpha_matting_erode_size"), 0, 40, 10
+                ),
+            )
+
         ctx.progress(0.3, "removing background (first run downloads the model)")
         try:
             session = _session(model)
-            result = remove(img, session=session)
+            if full_res and work is not orig:
+                # detect at reduced size, then upsample the mask (LANCZOS) and apply
+                # it to the original full-resolution pixels so detail is preserved
+                mask = remove(work, session=session, only_mask=True, **remove_kw)
+                mask = mask.resize(orig.size, Image.LANCZOS)
+                result = orig.convert("RGBA")
+                result.putalpha(mask)
+            else:
+                result = remove(work, session=session, **remove_kw)
         except Exception as exc:  # noqa: BLE001 - map to a friendly, labelled message
             msg = str(exc).lower()
             if any(k in msg for k in (
@@ -74,7 +147,9 @@ class ImageRemoveBg(Tool):
                 ) from None
             raise ToolError("background removal failed — the image may be unsupported") from None
         finally:
-            img.close()
+            if work is not orig:
+                work.close()
+            orig.close()
         out = ctx.output_dir / f"{src.stem}-nobg.png"
         result.save(out, "PNG")
         result.close()

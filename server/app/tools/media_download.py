@@ -35,6 +35,36 @@ class MediaDownload(Tool):
                 "enum": ["video", "audio"],
                 "default": "video",
             },
+            "audio_codec": {
+                "type": "string",
+                "title": "Audio codec",
+                "description": "Only for audio downloads. 'best' keeps the native "
+                               "stream with no transcode (fastest, best quality).",
+                "enum": ["mp3", "m4a", "opus", "best"],
+                "default": "mp3",
+            },
+            "max_height": {
+                "type": "integer",
+                "title": "Max video height (px)",
+                "description": "Cap resolution (e.g. 1080 or 720). Leave blank for best available.",
+                "minimum": 144,
+                "maximum": 4320,
+            },
+            "concurrent_fragments": {
+                "type": "integer",
+                "title": "Parallel fragments",
+                "description": "Download this many HLS/DASH fragments at once (faster on "
+                               "segmented streams). Output is identical.",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 4,
+            },
+            "subtitles": {
+                "type": "boolean",
+                "title": "Download & embed subtitles",
+                "description": "Fetch available subtitles and embed them into the video.",
+                "default": False,
+            },
         },
         "required": ["url"],
     }
@@ -63,6 +93,7 @@ class MediaDownload(Tool):
             elif d.get("status") == "finished":
                 ctx.progress(0.92, "processing")
 
+        concurrent = self._clamp_int(ctx.params.get("concurrent_fragments"), 1, 16, 4)
         opts = {
             "outtmpl": str(ctx.workdir / "%(title).80s.%(ext)s"),
             "noplaylist": True,
@@ -75,14 +106,34 @@ class MediaDownload(Tool):
             "socket_timeout": 30,
             "retries": 3,
             "fragment_retries": 3,
+            # parallelise segmented (HLS/DASH) downloads; identical output, faster.
+            "concurrent_fragment_downloads": concurrent,
             "progress_hooks": [_hook],
         }
+        want_subs = bool(ctx.params.get("subtitles", False))
         if mode == "audio":
+            audio_codec = str(ctx.params.get("audio_codec", "mp3"))
             opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+            if audio_codec != "best":
+                # 'best' keeps the native audio stream — skip the transcode entirely.
+                opts["postprocessors"] = [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": audio_codec}
+                ]
         else:
-            opts["format"] = "bestvideo*+bestaudio/best"
+            max_height = self._clamp_int(ctx.params.get("max_height"), 144, 4320, None)
+            if max_height is not None:
+                opts["format"] = (
+                    f"bestvideo[height<=?{max_height}]+bestaudio/"
+                    f"best[height<=?{max_height}]/best"
+                )
+            else:
+                opts["format"] = "bestvideo*+bestaudio/best"
             opts["merge_output_format"] = "mp4"
+            if want_subs:
+                opts["writesubtitles"] = True
+                opts["writeautomaticsub"] = True
+                opts["subtitleslangs"] = ["en.*", "en"]
+                opts["postprocessors"] = [{"key": "FFmpegEmbedSubtitle"}]
 
         ctx.progress(0.2, "downloading")
         try:
@@ -119,3 +170,12 @@ class MediaDownload(Tool):
                 f"the download is larger than the {size_cap // (1024 * 1024)} MB limit"
             )
         ctx.progress(1.0, "done")
+
+    @staticmethod
+    def _clamp_int(value, lo: int, hi: int, default):
+        try:
+            if value in (None, ""):
+                return default
+            return max(lo, min(hi, int(value)))
+        except (TypeError, ValueError):
+            return default

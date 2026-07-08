@@ -6,7 +6,7 @@ constant broadband noise like fans/ventilators. For a video input the original v
 is kept and only its audio is cleaned; for audio the original format is preserved.
 """
 
-from ._media import audio_bitrate_arg, probe
+from ._media import audio_bitrate_arg, guard_output_size, probe
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 
@@ -45,7 +45,15 @@ class SpeechDenoise(Tool):
                 "description": "light keeps more ambience; strong/max scrub heavy fan/ventilator noise",
                 "enum": ["light", "medium", "strong", "max"],
                 "default": "strong",
-            }
+            },
+            "noise_type": {
+                "type": "string",
+                "title": "Noise type",
+                "description": ("steady = constant fan/hum/hiss (default); varying = noise that "
+                                "changes over time (adaptive, tracks a shifting noise floor)"),
+                "enum": ["steady", "varying"],
+                "default": "steady",
+            },
         },
     }
 
@@ -56,6 +64,10 @@ class SpeechDenoise(Tool):
 
         strength = str(ctx.params.get("strength", "strong"))
         prop = _STRENGTH.get(strength, 0.9)
+        # steady -> stationary spectral gating (current default); varying -> adaptive
+        # mode that tracks a changing noise floor (typing, passing traffic, babble).
+        noise_type = str(ctx.params.get("noise_type", "steady")).strip().lower()
+        stationary = noise_type != "varying"
         src = ctx.input_paths[0]
 
         info = probe(ctx, src)
@@ -90,9 +102,9 @@ class SpeechDenoise(Tool):
                 y = data.astype(np.float32)
 
             if y.ndim == 1:
-                cleaned = nr.reduce_noise(y=y, sr=sr, stationary=True, prop_decrease=prop)
+                cleaned = nr.reduce_noise(y=y, sr=sr, stationary=stationary, prop_decrease=prop)
             else:  # (samples, channels) -> clean each channel
-                chans = [nr.reduce_noise(y=y[:, c], sr=sr, stationary=True, prop_decrease=prop)
+                chans = [nr.reduce_noise(y=y[:, c], sr=sr, stationary=stationary, prop_decrease=prop)
                          for c in range(y.shape[1])]
                 cleaned = np.stack(chans, axis=1)
             wavfile.write(str(wav_out), sr,
@@ -132,4 +144,5 @@ class SpeechDenoise(Tool):
 
         if not out.is_file() or out.stat().st_size == 0:
             raise ToolError("denoising produced no output")
+        guard_output_size(out, "denoised file")
         ctx.progress(1.0, "done")

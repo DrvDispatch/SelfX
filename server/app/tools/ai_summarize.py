@@ -18,8 +18,12 @@ _MAX_MAP_CHUNKS = 12
 _EXTRACT_CHARS = _CHUNK_CHARS * _MAX_MAP_CHUNKS  # 120k chars ~ 60-80 pages
 
 
-def _split(text: str, size: int = _CHUNK_CHARS) -> list[str]:
-    return [text[i:i + size] for i in range(0, len(text), size)]
+def _split(text: str, size: int = _CHUNK_CHARS, overlap: int = 0) -> list[str]:
+    # overlap=0 reproduces the original non-overlapping slices exactly.
+    if overlap <= 0:
+        return [text[i:i + size] for i in range(0, len(text), size)]
+    step = max(1, size - overlap)
+    return [text[i:i + size] for i in range(0, len(text), step)]
 
 
 @register
@@ -47,6 +51,14 @@ class AiSummarize(Tool):
                 "enum": ["auto", "english", "german", "french", "spanish", "arabic", "chinese"],
                 "default": "auto",
             },
+            "chunk_overlap": {
+                "type": "integer",
+                "title": "Chunk overlap (characters)",
+                "description": "Overlap between adjacent chunks in the map phase so context spanning a boundary isn't cut. 0 keeps the original non-overlapping behavior.",
+                "minimum": 0,
+                "maximum": 2000,
+                "default": 0,
+            },
         },
     }
 
@@ -60,9 +72,15 @@ class AiSummarize(Tool):
         lang_note = "" if language == "auto" else f" Respond in {language}."
         system = "You are a precise summarizer." + lang_note
 
+        try:
+            overlap = int(ctx.params.get("chunk_overlap", 0) or 0)
+        except (TypeError, ValueError):
+            overlap = 0
+        overlap = max(0, min(overlap, 2000))
+
         ctx.progress(0.2, "extracting text")
         text, truncated = extract_text(ctx.input_paths[0], max_chars=_EXTRACT_CHARS)
-        chunks = _split(text)
+        chunks = _split(text, overlap=overlap)
 
         if len(chunks) <= 1:
             ctx.progress(0.5, "summarizing with local AI")

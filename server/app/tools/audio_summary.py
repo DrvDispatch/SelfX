@@ -39,7 +39,20 @@ class AudioSummary(Tool):
                 "title": "Detail",
                 "enum": ["short", "medium", "detailed"],
                 "default": "medium",
-            }
+            },
+            "language": {
+                "type": "string",
+                "title": "Language",
+                "description": "ISO code (e.g. en, de, fr) or 'auto' to detect",
+                "default": "auto",
+                "maxLength": 10,
+            },
+            "include_timestamps": {
+                "type": "boolean",
+                "title": "Timestamps in transcript",
+                "description": "Prefix each line of the saved transcript with its time so notes can cite it.",
+                "default": False,
+            },
         },
     }
 
@@ -47,15 +60,19 @@ class AudioSummary(Tool):
         return _ollama.is_available()
 
     def run(self, ctx: ToolContext) -> None:
-        from .transcribe import _get_model
+        from .transcribe import _get_model, _resolve_language, _ts
 
         length = str(ctx.params.get("length", "medium"))
         instruction = _PROMPT.get(length, _PROMPT["medium"])
+        language = str(ctx.params.get("language", "auto"))
+        include_timestamps = bool(ctx.params.get("include_timestamps", False))
+        lang = _resolve_language(language)  # validates; raises a clear ToolError
         src = ctx.input_paths[0]
         ctx.progress(0.15, "transcribing audio")
         model = _get_model()
-        segments, info = model.transcribe(str(src), vad_filter=True)
-        transcript = " ".join(s.text.strip() for s in segments).strip()
+        segments, info = model.transcribe(str(src), language=lang, vad_filter=True)
+        segs = list(segments)
+        transcript = " ".join(s.text.strip() for s in segs).strip()
         if not transcript:
             raise ToolError("no speech was detected in the recording")
 
@@ -95,6 +112,12 @@ class AudioSummary(Tool):
             notes += "\n\n[Note: the recording was long; these notes cover only its first portion.]"
 
         stem = src.stem
+        if include_timestamps:
+            transcript_out = "\n".join(
+                f"[{_ts(s.start or 0, '.')}] {s.text.strip()}" for s in segs
+            )
+        else:
+            transcript_out = transcript
         (ctx.output_dir / f"{stem}-notes.txt").write_text(notes, encoding="utf-8")
-        (ctx.output_dir / f"{stem}-transcript.txt").write_text(transcript, encoding="utf-8")
+        (ctx.output_dir / f"{stem}-transcript.txt").write_text(transcript_out, encoding="utf-8")
         ctx.progress(1.0, "done")

@@ -65,10 +65,60 @@ class ImageConvert(Tool):
                 "minimum": 1,
                 "maximum": 20000,
             },
+            "max_height": {
+                "type": "integer",
+                "title": "Max height (px)",
+                "description": "Scale down if taller than this; leave blank to keep size",
+                "minimum": 1,
+                "maximum": 20000,
+            },
             "strip_metadata": {
                 "type": "boolean",
                 "title": "Strip metadata",
                 "default": True,
+            },
+            "to_srgb": {
+                "type": "boolean",
+                "title": "Convert to sRGB",
+                "description": (
+                    "When stripping metadata, convert wide-gamut images to sRGB "
+                    "first so colours don't shift once the ICC profile is dropped"
+                ),
+                "default": False,
+            },
+            "lossless": {
+                "type": "boolean",
+                "title": "Lossless (WebP)",
+                "description": "Encode WebP losslessly (ignores quality)",
+                "default": False,
+            },
+            "webp_method": {
+                "type": "integer",
+                "title": "WebP effort",
+                "description": "0 = fast/larger .. 6 = slow/smallest",
+                "minimum": 0,
+                "maximum": 6,
+                "default": 4,
+            },
+            "subsampling": {
+                "type": "string",
+                "title": "JPEG chroma subsampling",
+                "description": "auto = Pillow default; 4:4:4 keeps full colour detail",
+                "enum": ["auto", "4:4:4", "4:2:2", "4:2:0"],
+                "default": "auto",
+            },
+            "png_optimize": {
+                "type": "boolean",
+                "title": "Optimise PNG",
+                "description": "Extra lossless PNG compression pass (slower, smaller)",
+                "default": False,
+            },
+            "png_compress_level": {
+                "type": "integer",
+                "title": "PNG compression level",
+                "description": "0 = fast/large .. 9 = slow/small; leave blank for default",
+                "minimum": 0,
+                "maximum": 9,
             },
         },
         "required": ["format"],
@@ -81,12 +131,37 @@ class ImageConvert(Tool):
             raise ToolError(f"unsupported output format '{fmt}'")
         quality = int(ctx.params.get("quality", 85))
         max_width = ctx.params.get("max_width")
+        max_height = ctx.params.get("max_height")
         strip = bool(ctx.params.get("strip_metadata", True))
+        to_srgb = bool(ctx.params.get("to_srgb", False))
 
         src = ctx.input_paths[0]
         ctx.progress(0.2, "reading image")
         # load_image applies EXIF orientation and guards against decompression bombs
         img = load_image(src)
+
+        # When the caller wants the ICC profile dropped (strip=True) but opts in to
+        # sRGB conversion, remap the pixels through the embedded profile first so a
+        # wide-gamut phone photo doesn't visibly desaturate once the profile is gone.
+        if to_srgb and strip:
+            icc = img.info.get("icc_profile")
+            if icc:
+                try:
+                    from io import BytesIO
+
+                    from PIL import ImageCms
+
+                    src_profile = ImageCms.ImageCmsProfile(BytesIO(icc))
+                    dst_profile = ImageCms.createProfile("sRGB")
+                    out_mode = "RGB" if img.mode not in ("RGBA", "LA") else "RGBA"
+                    converted = ImageCms.profileToProfile(
+                        img, src_profile, dst_profile, outputMode=out_mode
+                    )
+                    if converted is not None:
+                        img = converted
+                        img.info.pop("icc_profile", None)
+                except Exception:
+                    pass  # best-effort: fall back to plain strip on any failure
 
         # flatten alpha onto white for formats that don't support it (no black JPEG)
         if pil_fmt in ("JPEG", "BMP"):
@@ -94,20 +169,43 @@ class ImageConvert(Tool):
         elif img.mode == "P":
             img = img.convert("RGBA")
 
-        if max_width:
+        # Scale down to fit within max_width / max_height (either may be set),
+        # preserving aspect ratio; only ever downscale, never enlarge.
+        def _int(val: object) -> int:
             try:
-                mw = int(max_width)
+                return int(val)  # type: ignore[arg-type]
             except (TypeError, ValueError):
-                mw = 0
-            if mw > 0 and img.width > mw:
-                ratio = mw / img.width
-                new_size = (mw, max(1, round(img.height * ratio)))
-                ctx.progress(0.5, f"resizing to {new_size[0]}px wide")
-                img = img.resize(new_size, Image.LANCZOS)
+                return 0
+
+        mw, mh = _int(max_width), _int(max_height)
+        scale = 1.0
+        if mw > 0 and img.width > mw:
+            scale = min(scale, mw / img.width)
+        if mh > 0 and img.height > mh:
+            scale = min(scale, mh / img.height)
+        if scale < 1.0:
+            new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+            ctx.progress(0.5, f"resizing to {new_size[0]}x{new_size[1]}")
+            img = img.resize(new_size, Image.LANCZOS)
 
         save_kw: dict = {}
         if pil_fmt in ("JPEG", "WEBP", "AVIF"):
             save_kw["quality"] = quality
+        if pil_fmt == "WEBP":
+            save_kw["method"] = max(0, min(6, int(ctx.params.get("webp_method", 4))))
+            if bool(ctx.params.get("lossless", False)):
+                save_kw["lossless"] = True
+        if pil_fmt == "JPEG":
+            sub = str(ctx.params.get("subsampling", "auto"))
+            sub_map = {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2}
+            if sub in sub_map:
+                save_kw["subsampling"] = sub_map[sub]
+        if pil_fmt == "PNG":
+            if bool(ctx.params.get("png_optimize", False)):
+                save_kw["optimize"] = True
+            cl = ctx.params.get("png_compress_level")
+            if cl is not None:
+                save_kw["compress_level"] = max(0, min(9, _int(cl)))
         if not strip:
             exif = img.info.get("exif")
             if exif:

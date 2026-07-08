@@ -34,6 +34,14 @@ _PRESETS: dict[str, tuple[str, list[str]]] = {
                     "[s0]palettegen[p];[s1][p]paletteuse"]),
 }
 
+# The two presets that re-encode video; they support per-stream copy decisions.
+_VIDEO_PRESETS = ("mp4-h264", "webm-vp9")
+
+# The libvpx-vp9 video-only encoder args, shared by the single-pass fragment and
+# the optional two-pass analysis run.
+_VP9_VIDEO_ARGS = ["-c:v", "libvpx-vp9", "-b:v", "0", "-cpu-used", "4",
+                   "-deadline", "good", "-row-mt", "1", "-tile-columns", "2"]
+
 # libx264 -preset choices, exposed so a CPU-bound user can trade speed for size.
 _X264_SPEEDS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
                 "medium", "slow", "slower", "veryslow"]
@@ -42,22 +50,18 @@ _X264_SPEEDS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
 # 2-hour source would otherwise feed the whole timeline through palettegen.
 _GIF_MAX_SECONDS = 30
 
+_POSIX = os.name == "posix"
+
 
 def _copy_override(info: dict, preset: str) -> list[str] | None:
-    """Return a stream-copy fragment when the source already matches the target.
+    """Return a stream-copy fragment when an AUDIO source already matches the target.
 
-    Turns a container change / same-codec convert into a near-instant, lossless
-    remux instead of a full re-encode. Returns None when a re-encode is required.
+    Turns a same-codec convert into a near-instant, lossless remux instead of a
+    full re-encode. Returns None when a re-encode is required. (Video presets use
+    the richer per-stream `_video_plan` instead.)
     """
-    ac, vc = info.get("acodec"), info.get("vcodec")
-    has_a, has_v = info.get("audio"), info.get("video")
-    if preset == "mp4-h264":
-        if has_v and vc == "h264" and (not has_a or ac == "aac"):
-            return ["-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart"]
-    elif preset == "webm-vp9":
-        if has_v and vc in ("vp9",) and (not has_a or ac in ("opus", "vorbis")):
-            return ["-c:v", "copy", "-c:a", "copy"]
-    elif preset == "mp3" and ac == "mp3":
+    ac = info.get("acodec")
+    if preset == "mp3" and ac == "mp3":
         return ["-vn", "-c:a", "copy"]
     elif preset == "opus" and ac == "opus":
         return ["-vn", "-c:a", "copy"]
@@ -66,6 +70,56 @@ def _copy_override(info: dict, preset: str) -> list[str] | None:
     elif preset == "wav" and ac == "pcm_s16le":
         return ["-vn", "-c:a", "copy"]
     return None
+
+
+def _video_plan(info: dict, preset: str, speed: str) -> tuple[list[str], bool, str]:
+    """Per-stream copy/encode plan for the two video presets.
+
+    Copies any stream already compatible with the target container (lossless and
+    near-instant) and re-encodes ONLY the mismatched stream(s). Returns
+    (fragment, video_is_re_encoded, progress_note). This is strictly better than
+    a blanket re-encode: an already-h264 track destined for mp4 (or vp9 for webm)
+    is stream-copied even when the audio has to be transcoded, and vice-versa.
+    """
+    vc, ac = info.get("vcodec"), info.get("acodec")
+    has_v, has_a = info.get("video"), info.get("audio")
+    frag: list[str] = []
+    venc = False
+    a_copied = False
+
+    if preset == "mp4-h264":
+        if has_v and vc == "h264":
+            frag += ["-c:v", "copy"]
+        else:
+            frag += ["-c:v", "libx264", "-preset", speed]
+            venc = True
+        if has_a:
+            if ac == "aac":
+                frag += ["-c:a", "copy"]
+                a_copied = True
+            else:
+                frag += ["-c:a", "aac", "-b:a", "160k"]
+        frag += ["-movflags", "+faststart"]
+    else:  # webm-vp9
+        if has_v and vc == "vp9":
+            frag += ["-c:v", "copy"]
+        else:
+            frag += list(_VP9_VIDEO_ARGS)
+            venc = True
+        if has_a:
+            if ac in ("opus", "vorbis"):
+                frag += ["-c:a", "copy"]
+                a_copied = True
+            else:
+                frag += ["-c:a", "libopus"]
+
+    if not venc and (a_copied or not has_a):
+        note = "remuxing (no re-encode)"
+    elif not venc or a_copied:
+        note = "converting (partial copy)"
+    else:
+        note = "converting"
+    return frag, venc, note
 
 
 @register
@@ -103,6 +157,21 @@ class MediaConvert(Tool):
                 "description": "Faster = quicker encode, larger file. Only used for mp4-h264.",
                 "enum": _X264_SPEEDS,
                 "default": "medium",
+            },
+            "two_pass": {
+                "type": "boolean",
+                "title": "Two-pass (webm-vp9)",
+                "description": "Analyse then encode for better quality-per-bit. "
+                               "Only used for webm-vp9 re-encodes; roughly doubles encode time.",
+                "default": False,
+            },
+            "subtitles": {
+                "type": "string",
+                "title": "Subtitles",
+                "description": "Keep source subtitle handling, or drop subtitles "
+                               "(avoids remux failures on incompatible subtitle streams).",
+                "enum": ["auto", "none"],
+                "default": "auto",
             },
         },
         "required": ["preset"],
@@ -144,30 +213,62 @@ class MediaConvert(Tool):
         duration = info["duration"] or self._duration(ctx, src)
 
         argv = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src)]
-        override = None if preset == "gif" else _copy_override(info, preset)
-        if override is not None:
-            # Same-codec / container-only change: lossless remux, no re-encode.
-            argv += override
-            ctx.progress(0.05, "remuxing (no re-encode)")
-        else:
-            frag = list(frag)
-            if preset == "mp4-h264":
-                speed = str(ctx.params.get("speed", "medium"))
-                if speed in _X264_SPEEDS and "-preset" in frag:
-                    frag[frag.index("-preset") + 1] = speed
-            argv += frag
+
+        if preset in _VIDEO_PRESETS:
+            speed = str(ctx.params.get("speed", "medium"))
+            if speed not in _X264_SPEEDS:
+                speed = "medium"
+            plan, venc, note = _video_plan(info, preset, speed)
+            argv += plan
             crf = ctx.params.get("crf")
-            if crf is None and preset == "webm-vp9":
-                crf = 32  # VP9 CQ mode needs a -crf; -b:v 0 alone is undefined quality
-            if crf is not None and preset in ("mp4-h264", "webm-vp9"):
-                argv += ["-crf", str(int(crf))]
-            if preset == "gif":
-                argv += ["-t", str(_GIF_MAX_SECONDS)]
+            if venc:
+                if crf is None and preset == "webm-vp9":
+                    crf = 32  # VP9 CQ mode needs a -crf; -b:v 0 alone is undefined quality
+                if crf is not None:
+                    argv += ["-crf", str(int(crf))]
+                if str(ctx.params.get("subtitles", "auto")) == "none":
+                    argv += ["-sn"]
+                # Optional two-pass VP9: run the analysis pass now, then tell the
+                # main (progress-tracked) encode to consume the stats.
+                if preset == "webm-vp9" and bool(ctx.params.get("two_pass", False)):
+                    passlog = ctx.workdir / "ffmpeg2pass"
+                    crf_val = crf if crf is not None else 32
+                    pass1 = (["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src)]
+                             + list(_VP9_VIDEO_ARGS)
+                             + ["-crf", str(int(crf_val)), "-pass", "1",
+                                "-passlogfile", str(passlog), "-an", "-f", "null",
+                                os.devnull])
+                    ctx.progress(0.05, "analysing (pass 1 of 2)")
+                    ctx.run_cmd(pass1)
+                    argv += ["-pass", "2", "-passlogfile", str(passlog)]
+            else:
+                # Pure/partial copy: a stream-copy container change can still trip
+                # over an incompatible subtitle stream — honour the drop request.
+                if str(ctx.params.get("subtitles", "auto")) == "none":
+                    argv += ["-sn"]
+            ctx.progress(0.05, note)
+        elif preset == "gif":
+            argv += list(frag)
+            argv += ["-t", str(_GIF_MAX_SECONDS)]
+        else:
+            # Audio presets: same-codec source -> lossless remux, else re-encode.
+            override = _copy_override(info, preset)
+            if override is not None:
+                argv += override
+                ctx.progress(0.05, "remuxing (no re-encode)")
+            else:
+                argv += list(frag)
+
         argv += ["-progress", "pipe:1", "-nostats", str(out_path)]
 
         err_path = ctx.workdir / "ffmpeg.err"
         ctx.progress(0.02, "starting conversion")
         deadline = time.monotonic() + settings.job_timeout_seconds
+        popen_kw: dict = {}
+        if _POSIX:
+            popen_kw["start_new_session"] = True  # own process group -> clean kill
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         with err_path.open("wb") as err_fh:
             proc = subprocess.Popen(
                 argv,
@@ -175,7 +276,7 @@ class MediaConvert(Tool):
                 stdout=subprocess.PIPE,
                 stderr=err_fh,
                 text=True,
-                start_new_session=True,  # own process group -> clean kill
+                **popen_kw,
             )
             try:
                 assert proc.stdout is not None
@@ -214,7 +315,12 @@ class MediaConvert(Tool):
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            if _POSIX:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                # Native Windows: killpg/getpgid don't exist — kill the whole tree.
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True)
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 proc.kill()

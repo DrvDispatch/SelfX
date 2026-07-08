@@ -6,6 +6,7 @@ model weights, so the first job is slower.
 
 import os
 
+from ._media import probe
 from .base import Tool, ToolContext, ToolError
 from .registry import register
 from ..config import settings
@@ -96,26 +97,88 @@ class Transcribe(Tool):
                 "enum": ["txt", "srt", "vtt", "json"],
                 "default": "txt",
             },
+            "task": {
+                "type": "string",
+                "title": "Task",
+                "description": "transcribe keeps the spoken language; translate renders English",
+                "enum": ["transcribe", "translate"],
+                "default": "transcribe",
+            },
+            "beam_size": {
+                "type": "integer",
+                "title": "Beam size",
+                "description": "Decoding beam width; 0 = auto (5 on GPU, 1 on CPU). Higher is more accurate but slower.",
+                "default": 0,
+                "minimum": 0,
+                "maximum": 10,
+            },
+            "word_timestamps": {
+                "type": "boolean",
+                "title": "Word-level timestamps",
+                "description": "Also compute per-word timings (included in JSON output).",
+                "default": False,
+            },
+            "condition_on_previous_text": {
+                "type": "boolean",
+                "title": "Condition on previous text",
+                "description": "Use prior text as context. Turn off to reduce repetition loops on hard audio.",
+                "default": True,
+            },
+            "initial_prompt": {
+                "type": "string",
+                "title": "Vocabulary hint",
+                "description": "Optional names/jargon to bias spelling (e.g. product or people names).",
+                "default": "",
+                "maxLength": 800,
+            },
         },
     }
 
     def run(self, ctx: ToolContext) -> None:
         language = str(ctx.params.get("language", "auto"))
         output = str(ctx.params.get("output", "txt"))
+        task = str(ctx.params.get("task", "transcribe")).strip().lower()
+        if task not in ("transcribe", "translate"):
+            task = "transcribe"
+        word_timestamps = bool(ctx.params.get("word_timestamps", False))
+        condition_prev = bool(ctx.params.get("condition_on_previous_text", True))
+        initial_prompt = str(ctx.params.get("initial_prompt", "")).strip() or None
         lang = _resolve_language(language)  # validates; raises a clear ToolError
-        model = _get_model()
+
         src = ctx.input_paths[0]
 
+        # Cheap ffprobe preflight: fail fast with a precise message (and skip loading
+        # the multi-hundred-MB model) when the file has no audio track at all.
+        info_probe = probe(ctx, src)
+        if (info_probe["video"] or info_probe["audio"] or info_probe["duration"] is not None) \
+                and not info_probe["audio"]:
+            raise ToolError("this file has no audio track to transcribe")
+
+        model = _get_model()
+
         # float16 on GPU can afford a wide beam; on CPU a narrow beam is much faster.
-        beam_size = 5 if settings.whisper_device.lower().startswith("cuda") else 1
+        # beam_size=0 keeps this device-aware default; a positive value overrides it.
+        beam_override = ctx.params.get("beam_size", 0)
+        try:
+            beam_override = int(beam_override)
+        except (TypeError, ValueError):
+            beam_override = 0
+        if beam_override > 0:
+            beam_size = max(1, min(10, beam_override))
+        else:
+            beam_size = 5 if settings.whisper_device.lower().startswith("cuda") else 1
 
         ctx.progress(0.1, "loading model / decoding audio")
         try:
             segments, info = model.transcribe(
                 str(src),
                 language=lang,
+                task=task,
                 vad_filter=True,
                 beam_size=beam_size,
+                word_timestamps=word_timestamps,
+                condition_on_previous_text=condition_prev,
+                initial_prompt=initial_prompt,
             )
             total = getattr(info, "duration", 0) or 0
             segs = []
@@ -123,6 +186,10 @@ class Transcribe(Tool):
                 segs.append(seg)
                 if total:
                     ctx.progress(min(0.95, (seg.end or 0) / total), "transcribing")
+                else:
+                    # Some containers report no duration; fall back to a creeping
+                    # indeterminate bar so progress doesn't freeze at 0.1.
+                    ctx.progress(min(0.9, 0.1 + 0.02 * len(segs)), "transcribing")
         except ToolError:
             raise
         except Exception:
@@ -140,12 +207,20 @@ class Transcribe(Tool):
         elif output == "json":
             import json
 
+            def _seg_dict(s):
+                d = {"start": s.start, "end": s.end, "text": s.text.strip()}
+                words = getattr(s, "words", None)
+                if word_timestamps and words:
+                    d["words"] = [
+                        {"start": w.start, "end": w.end, "word": w.word}
+                        for w in words
+                    ]
+                return d
+
             data = {
                 "language": getattr(info, "language", None),
                 "duration": total,
-                "segments": [
-                    {"start": s.start, "end": s.end, "text": s.text.strip()} for s in segs
-                ],
+                "segments": [_seg_dict(s) for s in segs],
             }
             out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         elif output in ("srt", "vtt"):

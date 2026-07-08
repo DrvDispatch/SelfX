@@ -60,16 +60,47 @@ class PdfSplit(Tool):
                 "description": "e.g. 1-3,7 (open-ended '5-' or '-3' also work) — leave empty to split every page into a separate PDF",
                 "default": "",
                 "maxLength": 200,
-            }
+            },
+            "chunk_size": {
+                "type": "integer",
+                "title": "Pages per file (burst mode)",
+                "description": "When bursting (no page spec), group this many pages into each output PDF. 0 or 1 = one page per file.",
+                "default": 0,
+                "minimum": 0,
+                "maximum": 10000,
+            },
+            "password": {
+                "type": "string",
+                "title": "Password",
+                "description": "Password to open the input if it is encrypted — leave blank for unprotected PDFs.",
+                "default": "",
+                "maxLength": 128,
+            },
+            "linearize": {
+                "type": "boolean",
+                "title": "Optimize for web (linearize)",
+                "description": "Linearize the extracted range (range mode only) for fast web view.",
+                "default": False,
+            },
         },
     }
 
     def run(self, ctx: ToolContext) -> None:
         spec = str(ctx.params.get("pages", "")).strip()
+        password = str(ctx.params.get("password", ""))
+        linearize = bool(ctx.params.get("linearize", False))
         try:
-            src = pikepdf.open(ctx.input_paths[0])
+            chunk_size = int(ctx.params.get("chunk_size", 0) or 0)
+        except (TypeError, ValueError):
+            chunk_size = 0
+        if chunk_size < 0:
+            chunk_size = 0
+        try:
+            src = pikepdf.open(ctx.input_paths[0], password=password)
         except pikepdf.PasswordError:
-            raise ToolError("the PDF is password-protected — remove the password first") from None
+            raise ToolError(
+                "the PDF is password-protected — provide the password or remove it first"
+            ) from None
         except pikepdf.PdfError:
             raise ToolError("the input is not a valid PDF file") from None
         try:
@@ -83,26 +114,35 @@ class PdfSplit(Tool):
                 try:
                     for i in indices:
                         out.pages.append(src.pages[i])
-                    out.save(ctx.output_dir / "split.pdf")
+                    save_kwargs = {"linearize": True} if linearize else {}
+                    out.save(ctx.output_dir / "split.pdf", **save_kwargs)
                 finally:
                     out.close()
                 ctx.progress(1.0, "saved split.pdf")
             else:
                 zip_path = ctx.output_dir / "pages.zip"
-                # Burst mode: serialize each one-page PDF into memory and store it
+                # Burst mode: serialize each PDF chunk into memory and store it
                 # uncompressed (ZIP_STORED). PDF page streams are already compressed,
                 # so DEFLATE + per-page temp files only waste CPU and double the I/O.
+                # chunk_size groups multiple pages per output file (default: one each).
+                step = chunk_size if chunk_size > 1 else 1
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-                    for i in range(total):
-                        ctx.progress(i / total, f"page {i + 1} of {total}")
+                    for start in range(0, total, step):
+                        end = min(start + step, total)
+                        ctx.progress(start / total, f"pages {start + 1}-{end} of {total}")
                         one = pikepdf.new()
                         buf = io.BytesIO()
                         try:
-                            one.pages.append(src.pages[i])
+                            for i in range(start, end):
+                                one.pages.append(src.pages[i])
                             one.save(buf)
                         finally:
                             one.close()
-                        zf.writestr(f"page_{i + 1:04d}.pdf", buf.getvalue())
+                        if step == 1:
+                            name = f"page_{start + 1:04d}.pdf"
+                        else:
+                            name = f"pages_{start + 1:04d}-{end:04d}.pdf"
+                        zf.writestr(name, buf.getvalue())
                 ctx.progress(1.0, f"burst {total} pages into pages.zip")
         finally:
             src.close()
