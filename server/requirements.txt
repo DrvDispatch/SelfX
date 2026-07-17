@@ -26,3 +26,4 @@ faster-whisper>=1.0,<2
 pgvector>=0.3,<1
 google-genai>=1,<2
 easyocr>=1.7.2  # image-to-text OCR (80+ langs, GPU)
+auto-editor>=29  # video-remove-silence (auto-cut)
