@@ -10,4 +10,5 @@ RUN npm run build
 FROM nginx:alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
+COPY --from=build /app/node_modules/pdfjs-dist/LICENSE /usr/share/nginx/html/licenses/pdfjs.txt
 EXPOSE 80

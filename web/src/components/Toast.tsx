@@ -83,7 +83,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={api}>
       {children}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col gap-2">
+      <div className="pointer-events-none fixed inset-x-4 bottom-[calc(4.4rem+env(safe-area-inset-bottom))] z-[100] mx-auto flex max-w-sm flex-col gap-2 lg:inset-x-auto lg:right-5 lg:bottom-5 lg:mx-0 lg:w-sm">
         {toasts.map((t) => {
           const { Icon, cls } = META[t.kind];
           return (

@@ -1,21 +1,26 @@
 """RQ worker entrypoint (`python -m app.worker`) and run_tool(job_id) — SPEC §6."""
 
+import argparse
 import json
 import logging
+import os
 import re
 import shutil
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 from uuid import UUID
 
 from redis import Redis
 from rq import Queue, Worker
 
 from .config import settings
-from .db import SessionLocal, init_db
+from .db import SessionLocal, engine, init_db
 from .models import File, Job
 from .queueing import JOB_EVENTS_CHANNEL, redis_conn
+from .services import workflows
 from .storage import ensure_dirs, file_abs_path, outputs_dir, sniff_mime_file, tmp_dir
 from .tools import discover
 from .tools.base import ToolContext, ToolError
@@ -154,25 +159,27 @@ def _rename_outputs(out_dir: Path, input_files: list[File]) -> None:
             break
 
 
-def _register_outputs(db, job: Job) -> int:
-    out_dir = outputs_dir(job.id)
+def _register_output(db, job: Job, path: Path) -> None:
     expires = None
     if settings.file_retention_hours > 0:
         expires = _utcnow() + timedelta(hours=settings.file_retention_hours)
+    db.add(File(
+        user_id=job.user_id,
+        job_id=job.id,
+        kind="output",
+        orig_name=path.name[:255],
+        stored_path=path.relative_to(settings.data_dir).as_posix(),
+        size=path.stat().st_size,
+        mime=sniff_mime_file(path),
+        expires_at=expires,
+    ))
+
+
+def _register_outputs(db, job: Job) -> int:
+    out_dir = outputs_dir(job.id)
     count = 0
     for path in sorted(p for p in out_dir.rglob("*") if p.is_file()):
-        db.add(
-            File(
-                user_id=job.user_id,
-                job_id=job.id,
-                kind="output",
-                orig_name=path.name[:255],
-                stored_path=path.relative_to(settings.data_dir).as_posix(),
-                size=path.stat().st_size,
-                mime=sniff_mime_file(path),
-                expires_at=expires,
-            )
-        )
+        _register_output(db, job, path)
         count += 1
     return count
 
@@ -187,7 +194,7 @@ def run_tool(job_id: str, params: dict | None = None) -> None:
     workdir = None
     try:
         with SessionLocal() as db:
-            job = db.get(Job, jid)
+            job = db.get(Job, jid, with_for_update=True)
             if job is None:
                 logger.error("job %s not found in database, skipping", jid)
                 return
@@ -277,7 +284,7 @@ def run_batch(job_id: str, tool_slug: str, params: dict | None = None) -> None:
     workdir = None
     try:
         with SessionLocal() as db:
-            job = db.get(Job, jid)
+            job = db.get(Job, jid, with_for_update=True)
             if job is None or job.status != "queued":
                 return
             job.status = "running"
@@ -363,7 +370,7 @@ def run_pipeline(job_id: str, steps: list[dict] | None = None) -> None:
     workdir = None
     try:
         with SessionLocal() as db:
-            job = db.get(Job, jid)
+            job = db.get(Job, jid, with_for_update=True)
             if job is None or job.status != "queued":
                 return
             job.status = "running"
@@ -455,23 +462,198 @@ def run_pipeline(job_id: str, steps: list[dict] | None = None) -> None:
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _active_attempt(db, job_id: UUID, attempt: int):
+    record = workflows.get_run(db, job_id, lock=True)
+    if record and record[0].status == "running" and record[1].attempt == attempt:
+        return record
+    return None
+
+
+def _heartbeat(job_id: UUID, attempt: int, stop: Event) -> None:
+    while not stop.wait(workflows.HEARTBEAT_SECONDS):
+        try:
+            with SessionLocal.begin() as db:
+                active = _active_attempt(db, job_id, attempt)
+                if active is None:
+                    return
+                active[1].heartbeat_at = _utcnow()
+        except Exception:
+            logger.warning("workflow %s heartbeat delayed", job_id, exc_info=True)
+
+
+def run_workflow(job_id: str, attempt: int) -> None:
+    """Claim a durable attempt and publish only its validated artifacts."""
+    jid = UUID(job_id)
+    staging = tmp_dir(jid) / f"attempt-{attempt}"
+    stop = Event()
+    thread = None
+    claimed = False
+    try:
+        with SessionLocal.begin() as db:
+            record = workflows.get_run(db, jid, lock=True)
+            if record is None:
+                return
+            job, run = record
+            if job.status != "queued" or run.attempt != attempt:
+                return
+            is_transcript = job.tool == workflows.TRANSCRIPT_WORKFLOW
+            checkpoint = workflows.get_checkpoint(db, jid) if is_transcript else None
+            checkpoint_path = file_abs_path(checkpoint.stored_path) if checkpoint else None
+            source = db.get(File, run.source_file_id) if run.source_file_id else None
+            source_path = file_abs_path(source.stored_path) if source else None
+            if checkpoint_path is None and (source_path is None or not source_path.is_file()):
+                workflows.mark_error(job, "The source file is no longer on disk.")
+                return
+            params = dict(job.params)
+            if source is not None:
+                params["source_name"] = source.orig_name
+            job.status = "running"
+            job.started_at = run.heartbeat_at = _utcnow()
+            job.message = "Preparing workflow" if checkpoint_path is None else "Using saved transcript"
+        claimed = True
+        _publish_job(job)
+
+        thread = Thread(target=_heartbeat, args=(jid, attempt, stop), daemon=True)
+        thread.start()
+        last_message = ""
+        last_update = 0.0
+
+        def progress(fraction: float, message: str = "") -> None:
+            nonlocal last_message, last_update
+            now = time.monotonic()
+            if message == last_message and now - last_update < 0.5:
+                return
+            with SessionLocal.begin() as db:
+                active = _active_attempt(db, jid, attempt)
+                if active is None:
+                    return
+                current, run = active
+                current.progress = max(current.progress, min(0.99, fraction))
+                if message:
+                    current.message = message[:512]
+                run.heartbeat_at = _utcnow()
+            _publish_job(current)
+            last_message, last_update = message, now
+
+        workdir, export_dir = staging / "work", staging / "outputs"
+        workdir.mkdir(parents=True, exist_ok=True)
+        export_dir.mkdir(exist_ok=True)
+        ctx = ToolContext(
+            job_id=jid, input_paths=[source_path] if source_path else [], params=params,
+            workdir=workdir, output_dir=export_dir, progress_cb=progress,
+        )
+        max_bytes = settings.max_output_mb * 1024 * 1024
+        out_dir = outputs_dir(jid)
+        checkpoint_size = 0
+        if is_transcript:
+            checkpoint_path = _run_transcript_step(ctx, attempt, checkpoint_path, out_dir, max_bytes)
+            if checkpoint_path is None:
+                return
+            checkpoint_size = checkpoint_path.stat().st_size
+            artifacts = [export_dir / "transcript.pdf", export_dir / "captions.srt"]
+        else:
+            from .services.workflow_actions import run_action_plan
+
+            run_action_plan(ctx, params["plan"])
+            artifacts = sorted(export_dir.iterdir())
+        if not artifacts or any(path.is_symlink() or not path.is_file() or not path.stat().st_size for path in artifacts):
+            raise ToolError("Workflow exports are incomplete")
+        if checkpoint_size + sum(path.stat().st_size for path in artifacts) > max_bytes:
+            raise ToolError("Exports exceed the output size limit")
+        with SessionLocal.begin() as db:
+            active = _active_attempt(db, jid, attempt)
+            if active is None:
+                return
+            current, _ = active
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for path in artifacts:
+                target = out_dir / path.name
+                os.replace(path, target)
+                _register_output(db, current, target)
+            current.status = "done"
+            current.progress = 1.0
+            current.message = "Results ready"
+            current.finished_at = _utcnow()
+        _publish_job(current)
+    except Exception as exc:
+        logger.exception("workflow %s attempt %s stopped", jid, attempt)
+        if claimed:
+            with SessionLocal.begin() as db:
+                active = _active_attempt(db, jid, attempt)
+                if active is None:
+                    return
+                current, _ = active
+                if isinstance(exc, ToolError):
+                    message = str(exc)
+                elif "Timeout" in type(exc).__name__:
+                    message = "The workflow reached its time limit"
+                else:
+                    message = "The workflow could not finish. Retry it from Activity."
+                workflows.mark_error(current, message)
+            _publish_job(current)
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=2)
+        if claimed:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _run_transcript_step(
+    ctx: ToolContext, attempt: int, checkpoint: Path | None, out_dir: Path, max_bytes: int,
+) -> Path | None:
+    from .tools._transcript_pdf import build_transcript, export_transcript_pdf
+
+    if checkpoint is None:
+        from .services.workflow_actions import prepare_speech
+
+        ctx.input_paths = [prepare_speech(ctx, ctx.input_paths[0])]
+        transcript = build_transcript(ctx)
+        pending = ctx.workdir / workflows.TRANSCRIPT_CHECKPOINT
+        with pending.open("w", encoding="utf-8") as stream:
+            json.dump(transcript, stream, ensure_ascii=False)
+        if pending.stat().st_size > max_bytes:
+            raise ToolError("Transcript exceeds the output size limit")
+        with SessionLocal.begin() as db:
+            active = _active_attempt(db, ctx.job_id, attempt)
+            if active is None:
+                return None
+            job, _ = active
+            out_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint = out_dir / workflows.TRANSCRIPT_CHECKPOINT
+            os.replace(pending, checkpoint)
+            _register_output(db, job, checkpoint)
+    else:
+        with checkpoint.open(encoding="utf-8") as stream:
+            transcript = json.load(stream)
+    export_transcript_pdf(ctx, transcript, include_json=False)
+    return checkpoint
+
+
+class SelfXWorker(Worker):
+    def perform_job(self, job, queue):
+        # A forked work horse needs its own DB connections.
+        engine.dispose(close=False)
+        return super().perform_job(job, queue)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    parser = argparse.ArgumentParser(description="Run a SelfX job worker.")
+    parser.add_argument("queues", nargs="*", metavar="queue", help="default or heavy (default: both)")
+    args = parser.parse_args()
+    queue_names = args.queues or ["default", "heavy"]
+    if any(name not in ("default", "heavy") for name in queue_names):
+        parser.error("queues must be default or heavy")
     init_db()
-    try:
-        from .kb.schema import ensure_schema as kb_ensure_schema
-
-        kb_ensure_schema()
-    except Exception:
-        logger.exception("kb schema setup failed in worker")
     ensure_dirs()
     connection = Redis.from_url(settings.redis_url)
-    queues = [Queue(name, connection=connection) for name in ("default", "heavy")]
-    logger.info("SelfX worker starting, consuming queues: default, heavy")
-    Worker(queues, connection=connection).work()
+    queues = [Queue(name, connection=connection) for name in queue_names]
+    logger.info("SelfX worker starting, consuming queues: %s", ", ".join(queue_names))
+    SelfXWorker(queues, connection=connection).work()
 
 
 if __name__ == "__main__":

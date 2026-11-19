@@ -120,7 +120,7 @@ export default function Pipeline() {
 
   return (
     <div className="mx-auto max-w-2xl p-6">
-      <Link to="/" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-fg">
+      <Link to="/tools" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-fg">
         <ArrowLeft className="h-4 w-4" />
         Dashboard
       </Link>

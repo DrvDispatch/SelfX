@@ -71,7 +71,7 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)  # {page, section, source}
     embedding: Mapped[list[float]] = mapped_column(Vector(settings.kb_embed_dim), nullable=False)
-    # NB: a generated `tsv tsvector` column + HNSW/GIN indexes are added in schema.ensure_schema()
+    # The initial database revision adds the generated tsv column and HNSW/GIN indexes.
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
 

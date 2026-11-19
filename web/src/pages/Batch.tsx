@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft, Layers, Play } from "lucide-react";
 import { ApiError, createBatchJob, listTools, uploadFileWithProgress } from "../api";
 import FileDrop from "../components/FileDrop";
-import ParamsForm from "../components/ParamsForm";
+import ToolOptions from "../components/ToolOptions";
 import { useToast } from "../components/Toast";
+import { fileToolMode } from "../toolDiscovery";
 import type { ToolInfo } from "../types";
 
 export default function Batch() {
   const navigate = useNavigate();
+  const { state } = useLocation();
+  const { presetSlug, presetFiles } = (state as { presetSlug?: string; presetFiles?: File[] } | null) ?? {};
   const toast = useToast();
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [slug, setSlug] = useState<string>("");
+  const [slug, setSlug] = useState(presetSlug ?? "");
   const [files, setFiles] = useState<File[]>([]);
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -53,13 +56,14 @@ export default function Batch() {
       if (prop.default !== undefined) init[name] = prop.default;
     }
     setParams(init);
-    setFiles([]);
+    const useSelection = tool.slug === presetSlug && presetFiles && fileToolMode(tool, presetFiles);
+    setFiles(useSelection ? presetFiles : []);
     setSubmitError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
+  }, [tool, presetSlug, presetFiles]);
 
   const validationError = useMemo(() => {
     if (!tool) return "Choose a tool to run";
+    if (!tool.available) return tool.unavailable_reason ?? "This tool needs setup";
     if (files.length < 1) return "Add at least one file";
     for (const name of tool.params_schema.required ?? []) {
       const v = params[name];
@@ -106,7 +110,7 @@ export default function Batch() {
   return (
     <div className="mx-auto max-w-2xl p-6">
       <Link
-        to="/"
+        to="/tools"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-fg"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -132,8 +136,9 @@ export default function Batch() {
       )}
 
       <section className="mb-6">
-        <h2 className="mb-2 text-sm font-medium text-fg">Tool</h2>
+        <label htmlFor="batch-tool" className="mb-2 block text-sm font-medium text-fg">Tool</label>
         <select
+          id="batch-tool"
           value={slug}
           onChange={(e) => setSlug(e.target.value)}
           disabled={submitting}
@@ -170,8 +175,8 @@ export default function Batch() {
               <h2 className="mb-2 text-sm font-medium text-fg">
                 Options <span className="font-normal text-muted">(applied to every file)</span>
               </h2>
-              <ParamsForm
-                schema={tool.params_schema}
+              <ToolOptions
+                tool={tool}
                 values={params}
                 onChange={(name, value) => setParams((prev) => ({ ...prev, [name]: value }))}
                 disabled={submitting || !tool.available}

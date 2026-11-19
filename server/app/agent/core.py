@@ -62,7 +62,7 @@ def slug_of(name: str) -> str:
     return name.replace("_", "-")
 
 
-def build_specs() -> list[dict]:
+def build_specs(*, include_discovery: bool = True) -> list[dict]:
     """One spec list feeds both Ollama and Gemini: {name, slug, kind, description, parameters}."""
     specs: list[dict] = []
     for slug in EXPOSED_SLUGS:
@@ -79,9 +79,10 @@ def build_specs() -> list[dict]:
             }
         specs.append({"name": fn_name(slug), "slug": slug, "kind": "tool",
                       "description": tool.description, "parameters": params})
-    for name, spec in INSTANT.items():
-        specs.append({"name": name, "slug": name, "kind": "instant",
-                      "description": spec["description"], "parameters": spec["parameters"]})
+    if include_discovery:
+        for name, spec in INSTANT.items():
+            specs.append({"name": name, "slug": name, "kind": "instant",
+                          "description": spec["description"], "parameters": spec["parameters"]})
     return specs
 
 
@@ -163,21 +164,30 @@ def _poll_job(job_id: uuid.UUID) -> dict:
     return {"ok": False, "status": "timeout", "error": "the job took too long"}
 
 
-def dispatch(name: str, args: dict, db: Session, user: User, attached_file_ids: list[uuid.UUID]) -> dict:
+def dispatch(
+    name: str, args: dict, db: Session, user: User, attached_file_ids: list[uuid.UUID],
+    *, include_discovery: bool = True,
+) -> dict:
     """Run one model-chosen function. Returns a SMALL result dict (ids/names/status/snippets)."""
     args = dict(args or {})
+    if name in INSTANT and not include_discovery:
+        return {"ok": False, "error": "This assistant cannot discover files or knowledge collections"}
     if name == "kb_search":
         return _kb_search(args, db, user)
     if name == "find_files":
         return _find_files(args, db, user)
 
     slug = slug_of(name)
+    if slug not in EXPOSED_SLUGS:
+        return {"ok": False, "error": "This action is unavailable to the assistant"}
     raw_ids = args.pop("file_ids", None)
     ids = raw_ids if raw_ids else [str(x) for x in attached_file_ids]
     try:
         file_ids = [uuid.UUID(str(x)) for x in (ids or [])]
     except ValueError:
         return {"ok": False, "error": "invalid file id"}
+    if not include_discovery and set(file_ids) - set(attached_file_ids):
+        return {"ok": False, "error": "Select the files this assistant may use"}
     try:
         job = create_and_run_job(db, user, slug, file_ids, args)
     except HTTPException as exc:

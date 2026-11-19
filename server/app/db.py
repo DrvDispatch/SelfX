@@ -23,10 +23,10 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
-    """Create all tables (SPEC §4: create_all on startup)."""
-    from . import models  # noqa: F401  (register mappings before create_all)
+    """Apply pending schema revisions for a Compose or standalone deployment."""
+    from .migrate import apply_migrations
 
-    Base.metadata.create_all(bind=engine)
+    apply_migrations(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

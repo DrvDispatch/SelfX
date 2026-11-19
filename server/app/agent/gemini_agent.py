@@ -54,7 +54,7 @@ def run(db: Session, user: User, message: str, attached_file_ids: list[uuid.UUID
     from google.genai import types
 
     client = _client()
-    specs = core.build_specs()
+    specs = core.build_specs(include_discovery=False)
     manifest = core.file_manifest(db, user, attached_file_ids)
     sys = _SYSTEM
     if manifest:
@@ -86,7 +86,7 @@ def run(db: Session, user: User, message: str, attached_file_ids: list[uuid.UUID
         parts = []
         for fc in fcalls:
             args = dict(fc.args or {})
-            result = core.dispatch(fc.name, args, db, user, attached_file_ids)
+            result = core.dispatch(fc.name, args, db, user, attached_file_ids, include_discovery=False)
             steps.append({"tool": fc.name, "args": args, "result": result})
             parts.append(types.Part.from_function_response(name=fc.name, response=result))
         contents.append(types.Content(role="tool", parts=parts))

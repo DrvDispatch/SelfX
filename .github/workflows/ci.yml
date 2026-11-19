@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build
+
+  native-install:
+    name: Native Ubuntu install and workflow smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SMOKE_PORT: "18800"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install SelfX
+        run: sudo bash deploy/install.sh --port "$SMOKE_PORT"
+      - name: Verify services start on boot
+        run: |
+          for unit in selfx-api.service selfx-worker@default.service selfx-worker@heavy.service selfx-redis.service; do
+            sudo systemctl is-enabled "$unit"
+            sudo systemctl is-active "$unit"
+          done
+      - name: Run backend tests
+        working-directory: server
+        run: /opt/selfx/current/venv/bin/python -m unittest discover -s tests -q
+      - name: Submit and verify jobs without a model
+        run: |
+          sudo bash -e -s -- "$SMOKE_PORT" <<'SCRIPT'
+          source /etc/selfx/selfx.env
+          export SELFX_ADMIN_USER SELFX_ADMIN_PASSWORD
+          exec python3 deploy/smoke-test.py --base-url "http://127.0.0.1:$1" --expect-planner-disabled
+          SCRIPT
+      - name: Show service logs after a failure
+        if: failure()
+        run: |
+          sudo journalctl --no-pager -n 150 \
+            -u selfx-api.service -u selfx-worker@default.service -u selfx-worker@heavy.service \
+            -u selfx-redis.service -u postgresql.service

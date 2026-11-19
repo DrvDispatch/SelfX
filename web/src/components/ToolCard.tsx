@@ -22,45 +22,34 @@ export default function ToolCard({ tool }: { tool: ToolInfo }) {
     };
   }, [tool.slug]);
 
-  const onStar = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setFav(toggleFavorite(tool.slug));
-  };
-
   return (
-    <Link
-      to={`/tool/${tool.slug}`}
-      title={disabled ? tool.unavailable_reason ?? "Needs setup" : tool.description}
-      className="group relative flex flex-col gap-2.5 rounded-2xl border border-line bg-surface p-4 shadow-[var(--shadow-card)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[var(--shadow-pop)]"
-      style={{ opacity: disabled ? 0.6 : 1 }}
-    >
+    <div className="relative rounded-xl border border-line bg-surface transition-colors hover:border-primary">
+      <Link
+        to={`/tool/${tool.slug}`}
+        className="flex h-full items-start gap-3 rounded-xl py-4 pr-12 pl-4"
+      >
+        <span
+          className="grid size-9 shrink-0 place-items-center rounded-lg"
+          style={{ background: `color-mix(in srgb, ${accent} 11%, var(--color-surface))` }}
+        >
+          <Icon aria-hidden className="size-4.5 text-fg" />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold leading-snug text-fg">{tool.name}</span>
+          <span className="mt-1 line-clamp-2 text-sm leading-snug text-muted">{tool.description}</span>
+          {disabled && <span className="mt-1 block text-xs font-medium text-muted">Needs setup</span>}
+        </span>
+      </Link>
       <button
         type="button"
-        onClick={onStar}
-        title={fav ? "Remove from favorites" : "Add to favorites"}
-        aria-label={fav ? "Remove from favorites" : "Add to favorites"}
-        className={`absolute right-2.5 top-2.5 grid h-7 w-7 place-items-center rounded-full transition-all hover:bg-surface-2 ${
-          fav ? "text-primary" : "text-faint opacity-0 group-hover:opacity-100 focus:opacity-100"
-        }`}
+        onClick={() => setFav(toggleFavorite(tool.slug))}
+        title={fav ? "Remove from saved tools" : "Save tool"}
+        aria-label={`Save ${tool.name}`}
+        aria-pressed={fav}
+        className={`absolute right-1.5 top-1.5 grid size-10 place-items-center rounded-lg hover:bg-surface-2 ${fav ? "text-primary" : "text-muted"}`}
       >
-        <Star className="h-4 w-4" fill={fav ? "currentColor" : "none"} />
+        <Star aria-hidden className="size-4" fill={fav ? "currentColor" : "none"} />
       </button>
-      <div className="flex items-center gap-3 pr-7">
-        <span
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl"
-          style={{ background: `color-mix(in srgb, ${accent} 14%, transparent)` }}
-        >
-          <Icon className="h-5 w-5" style={{ color: accent }} />
-        </span>
-        <span className="min-w-0 flex-1 font-semibold leading-tight text-fg">{tool.name}</span>
-      </div>
-      <p className="line-clamp-2 text-sm leading-snug text-muted">{tool.description}</p>
-      {disabled && (
-        <span className="mt-auto inline-flex w-fit items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-faint">
-          needs setup
-        </span>
-      )}
-    </Link>
+    </div>
   );
 }

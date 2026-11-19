@@ -5,11 +5,13 @@ import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from . import storage
 from .db import SessionLocal
-from .models import File, Job
+from .models import File, Job, WorkflowRun
+from .services.workflows import outputs_in_use
 
 logger = logging.getLogger("selfx.cleanup")
 
@@ -23,7 +25,15 @@ def _utcnow() -> datetime:
 
 def purge_expired_files(db: Session) -> int:
     now = _utcnow()
-    expired = db.query(File).filter(File.expires_at.is_not(None), File.expires_at < now).all()
+    active_input = exists(
+        select(WorkflowRun.job_id).join(Job).where(
+            WorkflowRun.source_file_id == File.id,
+            Job.status.in_(ACTIVE_STATUSES),
+        )
+    )
+    expired = db.scalars(
+        select(File).where(File.expires_at < now, ~active_input).with_for_update(skip_locked=True)
+    ).all()
     removed = 0
     for f in expired:
         if f.job_id is not None:
@@ -42,9 +52,13 @@ def purge_old_jobs(db: Session) -> int:
     old_jobs = (
         db.query(Job)
         .filter(Job.created_at < cutoff, Job.status.not_in(ACTIVE_STATUSES))
+        .with_for_update(skip_locked=True)
         .all()
     )
+    removed = 0
     for job in old_jobs:
+        if outputs_in_use(db, job.id):
+            continue
         for f in list(job.files):
             if f.kind == "output":
                 storage.delete_stored_file(f.stored_path)
@@ -53,8 +67,9 @@ def purge_old_jobs(db: Session) -> int:
                 f.job_id = None
         shutil.rmtree(storage.outputs_dir(job.id), ignore_errors=True)
         db.delete(job)
+        removed += 1
     db.commit()
-    return len(old_jobs)
+    return removed
 
 
 def purge_orphan_tmp(db: Session) -> int:

@@ -1,75 +1,92 @@
-import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { BookOpen, Boxes, ChevronDown, Clipboard, Cpu, Layers, LayoutGrid, ListChecks, LogOut, Menu, Moon, Search, Shield, Sparkles, Sun, Workflow, X, type LucideIcon } from "lucide-react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+import {
+  BookOpen, Boxes, ChevronDown, Clipboard, Cpu, Layers, LayoutGrid, ListChecks, LogOut,
+  Menu, Moon, Search, Shield, SlidersHorizontal, Sparkles, Sun, Workflow, X, type LucideIcon,
+} from "lucide-react";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
 import { imageFromPasteEvent } from "../clipboard";
+import Brand from "./Brand";
 import CommandPalette from "./CommandPalette";
+import RouteErrorBoundary from "./RouteErrorBoundary";
 
-interface NavItem { to: string; label: string; icon: LucideIcon; admin?: boolean; end?: boolean }
-
-function navClass({ isActive }: { isActive: boolean }): string {
-  return [
-    "flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
-    isActive
-      ? "bg-primary-soft text-primary"
-      : "text-muted hover:bg-surface-2 hover:text-fg",
-  ].join(" ");
+interface NavItem {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  matches?: string[];
 }
 
-// Primary pages shown in the desktop header and (with MORE_ITEMS) the mobile drawer.
 const PRIMARY: NavItem[] = [
-  { to: "/", label: "Tools", icon: LayoutGrid, end: true },
-  { to: "/assistant", label: "Assistant", icon: Sparkles },
-  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-  { to: "/paste", label: "Paste", icon: Clipboard },
-  { to: "/jobs", label: "Jobs", icon: ListChecks },
+  { to: "/", label: "Create", icon: Sparkles },
+  { to: "/tools", label: "Tools", icon: LayoutGrid, matches: ["/tool/"] },
+  { to: "/recipes", label: "Recipes", icon: BookOpen },
+  { to: "/jobs", label: "Activity", icon: ListChecks, matches: ["/runs/"] },
 ];
 
-// Secondary / power-user pages, tucked under the "More" menu so the header never wraps.
-const MORE_ITEMS: NavItem[] = [
+const UTILITIES: NavItem[] = [
+  { to: "/paste", label: "Paste image", icon: Clipboard },
   { to: "/batch", label: "Batch", icon: Layers },
   { to: "/pipeline", label: "Pipeline", icon: Workflow },
-  { to: "/quick-tools", label: "Quick Tools", icon: Boxes },
-  { to: "/models", label: "AI Models", icon: Cpu, admin: true },
-  { to: "/admin", label: "Admin", icon: Shield, admin: true },
+  { to: "/quick-tools", label: "Quick tools", icon: Boxes },
+  { to: "/assistant", label: "Assistant", icon: Sparkles },
+  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
 ];
+
+const SETTINGS: NavItem[] = [
+  { to: "/models", label: "AI models", icon: Cpu },
+  { to: "/admin", label: "Admin", icon: Shield },
+];
+
+function SidebarLinks({ items, path }: { items: NavItem[]; path: string }) {
+  return items.map(({ to, label, icon: Icon, matches }) => {
+    const current = path === to || matches?.some((prefix) => path.startsWith(prefix));
+    return (
+      <Link key={to} to={to} aria-current={current ? "page" : undefined}
+        className={`flex min-h-10 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${current ? "bg-primary-soft text-primary" : "text-muted hover:bg-surface-2 hover:text-fg"}`}>
+        <Icon className="size-[17px] shrink-0" aria-hidden="true" />
+        {label}
+      </Link>
+    );
+  });
+}
 
 export default function Layout() {
   const { user, logout } = useAuth();
   const { resolved, toggle } = useTheme();
   const navigate = useNavigate();
-  const location = useLocation();
+  const { pathname } = useLocation();
+  const drawer = useRef<HTMLDialogElement>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-
-  // Close the mobile drawer whenever the route changes.
-  useEffect(() => setDrawerOpen(false), [location.pathname]);
+  const themeLabel = resolved === "dark" ? "Switch to light theme" : "Switch to dark theme";
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setPaletteOpen((o) => !o);
+    drawer.current?.close();
+    setPaletteOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        drawer.current?.close();
+        setPaletteOpen((open) => !open);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Paste a screenshot ANYWHERE → route it to the Paste page ready to use. Ignore
-  // pastes aimed at editable fields so normal text paste (search, forms, chat) is untouched.
   useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const el = e.target as HTMLElement | null;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) {
-        return;
+    const onPaste = (event: ClipboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.matches("input, textarea, select") || target.isContentEditable)) return;
+      const file = imageFromPasteEvent(event);
+      if (file) {
+        event.preventDefault();
+        navigate("/paste", { state: { pastedImage: file } });
       }
-      const file = imageFromPasteEvent(e);
-      if (!file) return;
-      e.preventDefault();
-      navigate("/paste", { state: { pastedImage: file } });
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
@@ -81,165 +98,106 @@ export default function Layout() {
   };
 
   return (
-    <div className="min-h-full">
-      <header className="sticky top-0 z-30 border-b border-line bg-surface/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            aria-label="Open menu"
-            className="-ml-1 grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-fg md:hidden"
-          >
-            <Menu className="h-5 w-5" />
-          </button>
-          <NavLink to="/" className="flex items-center gap-2 text-lg font-extrabold tracking-tight text-fg">
-            <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary text-sm text-primary-fg">
-              S
-            </span>
-            <span className="hidden sm:inline">Self<span className="text-primary">X</span></span>
-          </NavLink>
+    <div className="min-h-full lg:grid lg:grid-cols-[14.5rem_minmax(0,1fr)]">
+      <a href="#workspace-content" className="sr-only z-[60] rounded-lg bg-surface p-3 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
+        Skip to content
+      </a>
+      <aside className="sticky top-0 hidden h-dvh overflow-y-auto border-r border-line bg-surface lg:flex lg:flex-col">
+        <Link to="/" aria-label="SelfX home" className="mx-4 my-5 self-start rounded-lg p-1">
+          <Brand />
+        </Link>
+        <nav aria-label="Workspace" className="space-y-1 px-3">
+          <SidebarLinks items={PRIMARY} path={pathname} />
+        </nav>
+        <div className="mx-5 my-5 h-px shrink-0 bg-line" />
+        <nav aria-label="More tools" className="space-y-1 px-3">
+          <SidebarLinks items={UTILITIES} path={pathname} />
+        </nav>
+        {user?.is_admin && (
+          <details className="group mx-3 mt-auto mb-4 pt-4" open={SETTINGS.some(({ to }) => pathname === to) || undefined}>
+            <summary className="flex min-h-10 cursor-pointer list-none items-center gap-3 rounded-lg px-3 text-sm font-medium text-muted hover:bg-surface-2 hover:text-fg [&::-webkit-details-marker]:hidden">
+              <SlidersHorizontal aria-hidden="true" className="size-[17px]" />
+              <span className="flex-1">Administration</span>
+              <ChevronDown aria-hidden="true" className="size-4 group-open:rotate-180" />
+            </summary>
+            <nav aria-label="Administration" className="mt-1 space-y-1 pl-3">
+              <SidebarLinks items={SETTINGS} path={pathname} />
+            </nav>
+          </details>
+        )}
+      </aside>
 
-          <nav className="ml-3 hidden items-center gap-1 md:flex">
-            <NavLink to="/" end className={navClass}>
-              <LayoutGrid className="h-4 w-4" /> Tools
-            </NavLink>
-            <NavLink to="/assistant" className={navClass}>
-              <Sparkles className="h-4 w-4" /> Assistant
-            </NavLink>
-            <NavLink to="/knowledge" className={navClass}>
-              <BookOpen className="h-4 w-4" /> Knowledge
-            </NavLink>
-            <NavLink to="/paste" className={navClass}>
-              <Clipboard className="h-4 w-4" /> Paste
-            </NavLink>
-            <NavLink to="/jobs" className={navClass}>
-              <ListChecks className="h-4 w-4" /> Jobs
-            </NavLink>
-
-            {/* Overflow menu keeps the header from wrapping as features grow */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setMoreOpen((o) => !o)}
-                className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg"
-              >
-                More <ChevronDown className={`h-4 w-4 transition-transform ${moreOpen ? "rotate-180" : ""}`} />
+      <div className="min-w-0">
+        <header className="sticky top-0 z-30 border-b border-line bg-bg/95 backdrop-blur">
+          <div className="mx-auto flex h-[3.8rem] max-w-[84rem] items-center gap-2 px-4 sm:px-7">
+            <button type="button" aria-label="Open menu" onClick={() => drawer.current?.showModal()}
+              className="-ml-1 grid size-10 place-items-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg lg:hidden">
+              <Menu aria-hidden="true" className="size-5" />
+            </button>
+            <Link to="/" aria-label="SelfX home" className="rounded-lg lg:hidden"><Brand /></Link>
+            <button type="button" aria-label="Search tools and pages" onClick={() => setPaletteOpen(true)}
+              className="ml-auto flex min-h-10 items-center gap-2 rounded-lg px-2.5 text-sm text-muted hover:bg-surface-2 hover:text-fg lg:ml-0 lg:border lg:border-line lg:bg-surface">
+              <Search aria-hidden="true" className="size-4.5" />
+              <span className="hidden lg:inline">Search tools and pages</span>
+              <kbd aria-hidden="true" className="ml-2 hidden rounded border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted lg:inline">Ctrl K</kbd>
+            </button>
+            <div className="hidden flex-1 lg:block" />
+            <button type="button" aria-label={themeLabel} title={themeLabel} onClick={toggle}
+              className="grid size-10 shrink-0 place-items-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg">
+              {resolved === "dark" ? <Sun aria-hidden="true" className="size-[17px]" /> : <Moon aria-hidden="true" className="size-[17px]" />}
+            </button>
+            <div className="flex h-9 shrink-0 items-center gap-1 border-l border-line pl-1.5 sm:gap-2 sm:pl-3">
+              <span className="hidden max-w-36 truncate text-sm font-medium text-fg sm:inline" title={user?.username}>{user?.username}</span>
+              <button type="button" aria-label="Log out" title="Log out" onClick={onLogout}
+                className="grid size-9 place-items-center rounded-lg text-muted hover:bg-surface-2 hover:text-danger">
+                <LogOut aria-hidden="true" className="size-4" />
               </button>
-              {moreOpen && (
-                <>
-                  <div className="fixed inset-0 z-10" onClick={() => setMoreOpen(false)} />
-                  <div className="absolute right-0 top-full z-20 mt-1.5 w-48 rounded-xl border border-line bg-surface p-1.5 shadow-[var(--shadow-pop)]">
-                    {MORE_ITEMS.filter((it) => !it.admin || user?.is_admin).map((it) => {
-                      const Icon = it.icon;
-                      return (
-                        <NavLink
-                          key={it.to}
-                          to={it.to}
-                          onClick={() => setMoreOpen(false)}
-                          className={({ isActive }) =>
-                            `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors ${
-                              isActive ? "bg-primary-soft text-primary" : "text-fg hover:bg-surface-2"
-                            }`
-                          }
-                        >
-                          <Icon className="h-4 w-4 shrink-0" /> {it.label}
-                        </NavLink>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
             </div>
-          </nav>
+          </div>
+        </header>
 
-          <div className="flex-1" />
+        <main id="workspace-content" tabIndex={-1} className="mx-auto max-w-[80rem] px-4 pt-6 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:px-7 sm:pt-8 lg:pb-11">
+          <RouteErrorBoundary key={pathname}>
+            <Suspense fallback={<p role="status" className="text-sm text-muted">Loading page…</p>}>
+              <Outlet />
+            </Suspense>
+          </RouteErrorBoundary>
+        </main>
+      </div>
 
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(true)}
-            title="Search (⌘K)"
-            className="hidden items-center gap-2 rounded-full bg-surface-2 py-1.5 pl-3 pr-1.5 text-sm text-muted transition-colors hover:text-fg sm:flex"
-          >
-            <Search className="h-4 w-4" />
-            <span className="text-faint">Search</span>
-            <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-faint">⌘K</kbd>
-          </button>
-
-          <button
-            type="button"
-            onClick={toggle}
-            title={resolved === "dark" ? "Switch to light" : "Switch to dark"}
-            className="grid h-9 w-9 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-fg"
-          >
-            {resolved === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-
-          <div className="flex items-center gap-2 rounded-full bg-surface-2 py-1 pl-1 pr-1 sm:pl-3">
-            <span className="hidden max-w-[9rem] truncate text-sm text-fg sm:inline" title={user?.username}>
-              {user?.username}
-            </span>
-            {user?.is_admin && (
-              <span className="hidden rounded-full bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary sm:inline">
-                admin
+      <nav aria-label="Workspace shortcuts" className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] lg:hidden">
+        {PRIMARY.map(({ to, label, icon: Icon, matches }) => {
+          const current = pathname === to || matches?.some((prefix) => pathname.startsWith(prefix));
+          return (
+            <Link key={to} to={to} aria-current={current ? "page" : undefined}
+              className={`flex min-h-[3.65rem] flex-col items-center justify-center gap-1 px-1 text-[11px] font-semibold ${current ? "text-primary" : "text-muted hover:bg-surface-2 hover:text-fg"}`}>
+              <span className={`grid h-6 w-9 place-items-center rounded-lg ${current ? "bg-primary-soft" : ""}`}>
+                <Icon aria-hidden="true" className="size-4.5" />
               </span>
-            )}
-            <button
-              type="button"
-              onClick={onLogout}
-              title="Log out"
-              className="grid h-7 w-7 place-items-center rounded-full text-muted transition-colors hover:bg-surface hover:text-danger"
-            >
-              <LogOut className="h-4 w-4" />
+              {label}
+            </Link>
+          );
+        })}
+      </nav>
+
+      <dialog ref={drawer} aria-label="Workspace menu" onClick={(event) => { if (event.target === event.currentTarget) drawer.current?.close(); }}
+        className="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-[min(19rem,90vw)] max-w-none border-r border-line bg-surface p-0 text-fg shadow-[var(--shadow-pop)] backdrop:bg-black/50">
+        <div className="min-h-full p-4">
+          <div className="mb-4 flex items-center justify-between">
+            <Brand />
+            <button type="button" aria-label="Close menu" onClick={() => drawer.current?.close()}
+              className="grid size-10 place-items-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg">
+              <X aria-hidden="true" className="size-5" />
             </button>
           </div>
-        </div>
-      </header>
-
-      {/* Mobile navigation drawer */}
-      {drawerOpen && (
-        <div className="fixed inset-0 z-40 md:hidden" role="dialog" aria-modal="true">
-          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} />
-          <nav className="animate-in absolute inset-y-0 left-0 flex w-72 max-w-[82%] flex-col gap-1 overflow-y-auto border-r border-line bg-surface p-3 shadow-[var(--shadow-pop)]">
-            <div className="mb-2 flex items-center justify-between px-1 py-1">
-              <span className="flex items-center gap-2 text-lg font-extrabold text-fg">
-                <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary text-sm text-primary-fg">S</span>
-                Self<span className="-ml-2 text-primary">X</span>
-              </span>
-              <button onClick={() => setDrawerOpen(false)} aria-label="Close menu" className="grid h-8 w-8 place-items-center rounded-full text-muted hover:bg-surface-2 hover:text-fg">
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <button
-              onClick={() => { setDrawerOpen(false); setPaletteOpen(true); }}
-              className="mb-1 flex items-center gap-2.5 rounded-xl bg-surface-2 px-3 py-2.5 text-sm text-muted"
-            >
-              <Search className="h-4 w-4" /> Search tools & pages
-            </button>
-            {[...PRIMARY, ...MORE_ITEMS.filter((it) => !it.admin || user?.is_admin)].map((it) => {
-              const Icon = it.icon;
-              return (
-                <NavLink
-                  key={it.to}
-                  to={it.to}
-                  end={it.end}
-                  onClick={() => setDrawerOpen(false)}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
-                      isActive ? "bg-primary-soft text-primary" : "text-fg hover:bg-surface-2"
-                    }`
-                  }
-                >
-                  <Icon className="h-4.5 w-4.5 shrink-0" /> {it.label}
-                </NavLink>
-              );
-            })}
+          <nav className="space-y-1" onClick={(event) => { if ((event.target as Element).closest("a")) drawer.current?.close(); }}>
+            <SidebarLinks items={PRIMARY} path={pathname} />
+            <div className="my-3 h-px bg-line" />
+            <SidebarLinks items={UTILITIES} path={pathname} />
+            {user?.is_admin && <><div className="my-3 h-px bg-line" /><SidebarLinks items={SETTINGS} path={pathname} /></>}
           </nav>
         </div>
-      )}
-
-      <main className="animate-in mx-auto max-w-6xl px-4 py-6 sm:py-8">
-        <Outlet />
-      </main>
+      </dialog>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>

@@ -15,7 +15,7 @@ fully researched and the scaffold is ~85% built. Two concrete gaps remain before
 **DONE ✅**
 - **Research**: a 15-agent workflow verified ~90 OSS projects live via `gh` on 2026-07-07
   (freshness, license, Docker, API). Full digest at
-  `C:\Users\saidm\AppData\Local\Temp\claude\C--SelfX\848d2b21-2480-4d07-9fb8-399ac1649836\scratchpad\research_digest.md`
+  `scratchpad/research_digest.md`
   (214 KB) and the raw task output at `...\tasks\w4nrl6dz7.output`.
 - **`docs/REPORT.md`** (45 KB): the full professional report the user asked for — all 22
   required sections (exec summary, best projects, architecture, per-category integration,
@@ -93,7 +93,7 @@ we're on `master`.
    - **Easiest mechanical path:** re-run the stopped scaffold workflow from cache — it will
      replay the 3 finished agents instantly and re-run only the server-tools stage + reviewers:
      `Workflow({ scriptPath:
-     "C:\\Users\\saidm\\.claude\\projects\\C--SelfX\\848d2b21-2480-4d07-9fb8-399ac1649836\\workflows\\scripts\\selfx-scaffold-wf_31d6b672-a76.js",
+     "C:\\path\\to\\selfx-scaffold-workflow.js",
      resumeFromRunId: "wf_31d6b672-a76" })`. (Verify the cache actually replays; if the run is
      from a prior process and won't resume, just write the adapters directly — it's ~15 small files.)
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Bookmark, BookmarkPlus, Play, X } from "lucide-react";
 import {
@@ -12,11 +12,14 @@ import {
   type Preset,
 } from "../api";
 import FileDrop from "../components/FileDrop";
-import ParamsForm from "../components/ParamsForm";
+import ToolOptions from "../components/ToolOptions";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ConfirmDialog";
 import { addRecentTool } from "../prefs";
+import { fileToolMode } from "../toolDiscovery";
 import type { ToolInfo } from "../types";
+
+const PdfOrganizer = lazy(() => import("../components/PdfOrganizer"));
 
 function defaultsFor(tool: ToolInfo): Record<string, unknown> {
   const init: Record<string, unknown> = {};
@@ -50,6 +53,7 @@ export default function ToolPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(null);
     listTools()
       .then((tools) => {
         if (cancelled) return;
@@ -81,18 +85,9 @@ export default function ToolPage() {
     listPresets()
       .then((all) => setPresets(all.filter((p) => p.tool === tool.slug)))
       .catch(() => setPresets([]));
-    if (presetFiles?.length && tool.min_files > 0) {
-      const acc = tool.accepts.map((a) => a.toLowerCase());
-      const matched = presetFiles.filter(
-        (f) => acc.length === 0 || acc.some((a) => f.name.toLowerCase().endsWith(a)),
-      );
-      setFiles(tool.multi_file ? matched : matched.slice(0, 1));
-    } else {
-      setFiles([]);
-    }
+    setFiles(presetFiles && fileToolMode(tool, presetFiles) === "single" ? presetFiles : []);
     setSubmitError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool]);
+  }, [tool, presetFiles]);
 
   const validationError = useMemo(() => {
     if (!tool) return null;
@@ -103,6 +98,9 @@ export default function ToolPage() {
     }
     if (!tool.multi_file && files.length > 1) {
       return "This tool takes a single file";
+    }
+    if (tool.slug === "pdf-organize" && !String(params.page_order ?? "").trim() && !String(params.remove_pages ?? "").trim()) {
+      return "Move or remove a page to export a new PDF";
     }
     for (const name of tool.params_schema.required ?? []) {
       const v = params[name];
@@ -193,21 +191,30 @@ export default function ToolPage() {
         <p className="mb-4 rounded-xl border border-line bg-surface-2 px-3 py-2 text-sm text-danger">
           {loadError ?? "Tool not found"}
         </p>
-        <Link to="/" className="text-sm text-primary hover:underline">
-          Back to dashboard
+        <Link to="/tools" className="text-sm text-primary hover:underline">
+          Back to tools
         </Link>
       </div>
     );
   }
 
+  const organizing = tool.slug === "pdf-organize";
+  const optionForm = (
+    <ToolOptions
+      tool={tool}
+      values={params}
+      onChange={(name, value) => setParams((prev) => ({ ...prev, [name]: value }))}
+      disabled={submitting || !tool.available}
+    />
+  );
   return (
-    <div className="mx-auto max-w-2xl p-6">
+    <div className={`mx-auto ${organizing ? "max-w-5xl" : "max-w-2xl"} p-3 sm:p-6`}>
       <Link
-        to="/"
+        to="/tools"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-fg"
       >
         <ArrowLeft className="h-4 w-4" />
-        Dashboard
+        All tools
       </Link>
       <div className="mb-6">
         <h1 className="text-xl font-bold text-fg">{tool.name}</h1>
@@ -235,23 +242,48 @@ export default function ToolPage() {
             accepts={tool.accepts}
             multiple={tool.multi_file}
             files={files}
-            onChange={setFiles}
+            onChange={(next) => {
+              if (organizing && next[0] !== files[0]) {
+                setParams(defaultsFor(tool));
+                setPresetMsg(null);
+              }
+              setFiles(next);
+            }}
             disabled={submitting || !tool.available}
           />
         </section>
       )}
 
-      <section className="mb-6">
-        <h2 className="mb-2 text-sm font-medium text-fg">Options</h2>
-        <ParamsForm
-          schema={tool.params_schema}
-          values={params}
-          onChange={(name, value) =>
-            setParams((prev) => ({ ...prev, [name]: value }))
-          }
-          disabled={submitting || !tool.available}
-        />
-      </section>
+      {organizing && files[0] && (
+        <section className="mb-5">
+          <Suspense fallback={<p role="status" className="text-sm text-muted">Opening page editor…</p>}>
+            <PdfOrganizer
+              file={files[0]}
+              pageOrder={String(params.page_order ?? "")}
+              removePages={String(params.remove_pages ?? "")}
+              disabled={submitting || !tool.available}
+              onChange={(pageOrder, removePages) =>
+                setParams((previous) => ({ ...previous, page_order: pageOrder, remove_pages: removePages }))
+              }
+            />
+          </Suspense>
+        </section>
+      )}
+      {Object.keys(tool.params_schema.properties ?? {}).length > 0 && (
+        <section className="mb-6">
+          {organizing ? (
+            <details className="rounded-xl border border-line bg-surface p-3">
+              <summary className="cursor-pointer text-sm font-medium text-fg">Enter page ranges</summary>
+              <div className="mt-3">{optionForm}</div>
+            </details>
+          ) : (
+            <>
+              <h2 className="mb-2 text-sm font-medium text-fg">Options</h2>
+              {optionForm}
+            </>
+          )}
+        </section>
+      )}
 
       {Object.keys(tool.params_schema.properties ?? {}).length > 0 && (
         <section className="mb-6">
@@ -350,7 +382,7 @@ export default function ToolPage() {
           className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-fg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Play className="h-4 w-4" />
-          {submitting ? "Running…" : "Run"}
+          {submitting ? "Starting…" : tool.slug === "transcribe" ? "Start transcription" : organizing ? "Export PDF" : "Run"}
         </button>
         {submitting && step && (
           <span className="text-sm text-muted">{step}</span>

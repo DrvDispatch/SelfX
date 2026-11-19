@@ -1,0 +1,30 @@
+name: Bug report
+description: Report something that fails or behaves unexpectedly in SelfX.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe what you expected and what you saw. Include the tool or workflow name.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: If a file is needed, share a small public example or describe its format and size.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: SelfX version, operating system and browser
+      placeholder: "SelfX commit or release, Ubuntu 24.04, Firefox"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Share the relevant lines and remove credentials, tokens, and private filenames first.

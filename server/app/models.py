@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -77,6 +78,25 @@ class File(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     job: Mapped[Job | None] = relationship(back_populates="files")
+
+
+class WorkflowRun(Base):
+    """Execution state for the file-to-transcript recipe."""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (UniqueConstraint("user_id", "request_key", name="uq_workflow_user_request"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    source_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("files.id", ondelete="SET NULL"), index=True,
+    )
+    request_key: Mapped[str | None] = mapped_column(String(128))
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Preset(Base):

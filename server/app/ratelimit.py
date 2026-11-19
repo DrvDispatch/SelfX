@@ -24,7 +24,12 @@ def user_or_ip_key(request: Request) -> str:
 
 limiter = Limiter(
     key_func=user_or_ip_key,
-    storage_uri=settings.redis_url,
+    # redis-py and limits use different schemes for the same Unix socket.
+    storage_uri=(
+        f"redis+{settings.redis_url}"
+        if settings.redis_url.startswith("unix://")
+        else settings.redis_url
+    ),
     swallow_errors=True,  # if redis is briefly down, do not 500 on rate-limit lookups
 )
 

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Boxes, Download, Loader2, Trash2 } from "lucide-react";
 import { ApiError, deleteModel, listModels, pullModel, type OllamaModel } from "../api";
 import { RowsSkeleton } from "../components/Skeleton";
+import HardwarePreflight from "../components/HardwarePreflight";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ConfirmDialog";
 import { formatBytes } from "../format";
@@ -16,6 +17,7 @@ export default function Models() {
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const pullInput = useRef<HTMLInputElement>(null);
 
   const refresh = () =>
     listModels()
@@ -63,10 +65,15 @@ export default function Models() {
         </div>
       </div>
 
+      <HardwarePreflight onUseModel={(model) => {
+        setName(model);
+        pullInput.current?.focus();
+      }} />
+
       {error && <p className="mb-4 rounded-xl border border-line bg-surface-2 px-3 py-2 text-sm text-danger">{error}</p>}
 
       <div className="mb-4 flex gap-2">
-        <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void pull(name)}
+        <input ref={pullInput} aria-label="Model name to pull" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void pull(name)}
                placeholder="Pull a model, e.g. qwen3:8b"
                className="flex-1 rounded-xl border border-line bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none placeholder:text-faint focus:border-primary" />
         <button onClick={() => void pull(name)} className="flex items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-fg hover:opacity-90">

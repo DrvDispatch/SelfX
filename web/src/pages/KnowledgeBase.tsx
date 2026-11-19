@@ -32,29 +32,43 @@ export default function KnowledgeBase() {
   const [newName, setNewName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const activeCollection = useRef<{ id: string } | null>(null);
 
   const refreshCols = useCallback(() => kbListCollections().then(setCols).catch(() => undefined), []);
   useEffect(() => { void refreshCols(); }, [refreshCols]);
 
   const openCollection = useCallback((c: KbCollection) => {
+    const selection = { id: c.id };
+    activeCollection.current = selection;
     setSel(c);
+    setDocs([]);
     setMsgs([]);
-    kbListDocuments(c.id).then(setDocs).catch(() => undefined);
-    kbMessages(c.id).then((m) => setMsgs(m)).catch(() => undefined);
+    kbListDocuments(c.id).then((documents) => {
+      if (activeCollection.current === selection) setDocs(documents);
+    }).catch(() => undefined);
+    kbMessages(c.id).then((messages) => {
+      if (activeCollection.current === selection) setMsgs(messages);
+    }).catch(() => undefined);
   }, []);
 
   // poll doc statuses while any are still indexing
   useEffect(() => {
     if (!sel) return;
     if (!docs.some((d) => d.status === "pending" || d.status === "indexing")) return;
+    const selection = activeCollection.current;
     const t = setTimeout(() => {
-      kbListDocuments(sel.id).then(setDocs).catch(() => undefined);
+      kbListDocuments(sel.id).then((documents) => {
+        if (activeCollection.current === selection) setDocs(documents);
+      }).catch(() => undefined);
       void refreshCols();
     }, 2000);
     return () => clearTimeout(t);
   }, [sel, docs, refreshCols]);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [msgs, busy]);
+  useEffect(() => {
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    endRef.current?.scrollIntoView({ behavior, block: "nearest" });
+  }, [msgs, busy]);
 
   const create = async () => {
     if (!newName.trim()) return;
@@ -71,6 +85,7 @@ export default function KnowledgeBase() {
 
   const addFiles = async (fl: FileList | File[]) => {
     if (!sel) return;
+    const selection = activeCollection.current;
     const list = Array.from(fl);
     setBusy(true);
     const tid = toast.loading(`Uploading ${list.length} document${list.length === 1 ? "" : "s"}…`);
@@ -89,7 +104,7 @@ export default function KnowledgeBase() {
       }
       if (ids.length) {
         const added = await kbAddDocuments(sel.id, ids);
-        setDocs((d) => [...d, ...added]);
+        if (activeCollection.current === selection) setDocs((d) => [...d, ...added]);
         toast.update(tid, { kind: "success", message: `Added ${ids.length} document${ids.length === 1 ? "" : "s"} — indexing…`, duration: 3500 });
         void refreshCols();
       } else {
@@ -105,14 +120,19 @@ export default function KnowledgeBase() {
   const ask = async () => {
     const question = q.trim();
     if (!question || !sel || busy) return;
+    const selection = activeCollection.current;
     setBusy(true);
     setMsgs((m) => [...m, { role: "user", content: question, citations: [] }]);
     setQ("");
     try {
       const r = await kbChat(sel.id, question);
-      setMsgs((m) => [...m, { role: "assistant", content: r.answer, citations: r.citations }]);
+      if (activeCollection.current === selection) {
+        setMsgs((m) => [...m, { role: "assistant", content: r.answer, citations: r.citations }]);
+      }
     } catch (e) {
-      setMsgs((m) => [...m, { role: "assistant", content: `Error: ${e instanceof Error ? e.message : "failed"}`, citations: [] }]);
+      if (activeCollection.current === selection) {
+        setMsgs((m) => [...m, { role: "assistant", content: `Error: ${e instanceof Error ? e.message : "failed"}`, citations: [] }]);
+      }
     } finally {
       setBusy(false);
     }
@@ -122,7 +142,10 @@ export default function KnowledgeBase() {
     if (!(await confirm({ title: `Delete “${c.name}”?`, message: `${c.documents} document(s) and their embeddings will be removed.`, danger: true, confirmLabel: "Delete" }))) return;
     try {
       await kbDeleteCollection(c.id);
-      if (sel?.id === c.id) setSel(null);
+      if (activeCollection.current?.id === c.id) {
+        activeCollection.current = null;
+        setSel(null);
+      }
       await refreshCols();
       toast.success(`Collection “${c.name}” deleted`);
     } catch (e) {

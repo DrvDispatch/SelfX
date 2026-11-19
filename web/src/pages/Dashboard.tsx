@@ -1,50 +1,50 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { useNavigate } from "react-router-dom";
-import { Boxes, Clock, Search, Sparkles, Star, Upload, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { ArrowRight, BookOpen, Boxes, FileUp, Search, Star, X } from "lucide-react";
 import { ApiError, listTools } from "../api";
-import { accentVar, categoryMeta, CATEGORY_ORDER } from "../categories";
+import { categoryMeta, CATEGORY_ORDER } from "../categories";
 import ToolCard from "../components/ToolCard";
 import { CardGridSkeleton } from "../components/Skeleton";
 import { PREFS_EVENT, getFavorites, getRecentTools } from "../prefs";
+import { fileToolMode, matchesSearch, toolSearchText } from "../toolDiscovery";
 import type { ToolInfo } from "../types";
 
-function extsOf(files: File[]): string[] {
-  const set = new Set<string>();
-  for (const f of files) {
-    const parts = f.name.split(".");
-    if (parts.length > 1) set.add("." + parts.pop()!.toLowerCase());
-  }
-  return [...set];
-}
+const commonTasks = [
+  "pdf-organize", "video-target-size", "subtitle-cleanup", "pdf-merge", "transcribe", "image-convert",
+];
+const grid = "grid gap-3 sm:grid-cols-2 xl:grid-cols-3";
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [drop, setDrop] = useState<{ files: File[]; matches: ToolInfo[] } | null>(null);
+  const [category, setCategory] = useState("browse");
+  const [files, setFiles] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  const [favSlugs, setFavSlugs] = useState<string[]>(() => getFavorites());
-  const [recentSlugs, setRecentSlugs] = useState<string[]>(() => getRecentTools());
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [favorites, setFavorites] = useState(getFavorites);
+  const [recents, setRecents] = useState(getRecentTools);
 
   useEffect(() => {
-    let cancelled = false;
+    let active = true;
+    setLoading(true);
+    setError(null);
     listTools()
-      .then((t) => !cancelled && setTools(t))
-      .catch((e: unknown) => !cancelled && setError(e instanceof ApiError ? e.detail : "Failed to load tools"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+      .then((all) => { if (active) setTools(all); })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof ApiError ? err.detail : "Could not load tools.");
+      })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [attempt]);
 
-  // Keep favorites/recents in sync as they change (starred here or on a tool page).
   useEffect(() => {
     const sync = () => {
-      setFavSlugs(getFavorites());
-      setRecentSlugs(getRecentTools());
+      setFavorites(getFavorites());
+      setRecents(getRecentTools());
     };
     window.addEventListener(PREFS_EVENT, sync);
     window.addEventListener("storage", sync);
@@ -54,234 +54,209 @@ export default function Dashboard() {
     };
   }, []);
 
-  const bySlug = useMemo(() => new Map(tools.map((t) => [t.slug, t])), [tools]);
-  const favTools = useMemo(
-    () => favSlugs.map((s) => bySlug.get(s)).filter((t): t is ToolInfo => t !== undefined),
-    [favSlugs, bySlug],
-  );
-  const recentTools = useMemo(
-    () =>
-      recentSlugs
-        .filter((s) => !favSlugs.includes(s))
-        .map((s) => bySlug.get(s))
-        .filter((t): t is ToolInfo => t !== undefined)
-        .slice(0, 4),
-    [recentSlugs, favSlugs, bySlug],
-  );
+  const bySlug = useMemo(() => new Map(tools.map((tool) => [tool.slug, tool])), [tools]);
+  const frequent = commonTasks.map((slug) => bySlug.get(slug)).filter((tool) => tool?.available);
+  const recent = recents.map((slug) => bySlug.get(slug)).filter(Boolean).slice(0, 4);
+  const matches = useMemo(() => tools.flatMap((tool) => {
+    const mode = fileToolMode(tool, files);
+    return mode ? [{ tool, mode }] : [];
+  }).sort((a, b) =>
+    Number(a.tool.accepts.length === 0) - Number(b.tool.accepts.length === 0)
+      || a.tool.name.localeCompare(b.tool.name),
+  ), [tools, files]);
 
-  const suggest = (files: File[]) => {
-    if (!files.length) return;
-    const exts = extsOf(files);
-    const byExt = tools.filter(
-      (t) => t.available && t.min_files > 0 && t.accepts.length > 0 &&
-        t.accepts.some((a) => exts.includes(a.toLowerCase())),
-    );
-    const anyFile = tools.filter((t) => t.available && t.min_files > 0 && t.accepts.length === 0);
-    setDrop({ files, matches: [...byExt, ...anyFile] });
-  };
-
-  const onDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragOver(false);
-    if (e.dataTransfer.files.length) suggest(Array.from(e.dataTransfer.files));
-  };
-
-  const openTool = (slug: string) =>
-    navigate(`/tool/${slug}`, { state: drop ? { presetFiles: drop.files } : undefined });
-
-  const grouped = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const filtered = q
-      ? tools.filter((t) => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
-      : tools;
-    const byCat = new Map<string, ToolInfo[]>();
-    for (const t of filtered) {
-      const list = byCat.get(t.category) ?? [];
-      list.push(t);
-      byCat.set(t.category, list);
-    }
-    const cats = [
-      ...CATEGORY_ORDER.filter((c) => byCat.has(c)),
-      ...[...byCat.keys()].filter((c) => !CATEGORY_ORDER.includes(c)).sort(),
-    ];
-    return cats.map((c) => ({ category: c, tools: byCat.get(c)!.slice().sort((a, b) => a.name.localeCompare(b.name)) }));
-  }, [tools, query]);
-
-  const available = tools.filter((t) => t.available).length;
+  const isBrowsing = category === "browse" && !query.trim();
+  const visible = tools.filter((tool) => {
+    if (category === "saved" && !favorites.includes(tool.slug)) return false;
+    if (!["browse", "all", "saved"].includes(category) && tool.category !== category) return false;
+    return matchesSearch(toolSearchText(tool), query);
+  }).sort((a, b) => Number(b.available) - Number(a.available) || a.name.localeCompare(b.name));
+  const knownCategories = new Set(tools.map((tool) => tool.category));
+  const categories = [
+    ...CATEGORY_ORDER.filter((key) => knownCategories.has(key)),
+    ...[...knownCategories].filter((key) => !CATEGORY_ORDER.includes(key)).sort(),
+  ];
+  const filters = [
+    { key: "all", label: "All tools" },
+    ...categories.map(categoryMeta),
+    { key: "saved", label: "Saved", icon: Star },
+  ];
 
   return (
-    <div>
-      {/* Hero + smart drop zone */}
-      <section className="mb-6 overflow-hidden rounded-3xl border border-line bg-surface p-6 sm:p-8">
-        <div className="mb-5 flex flex-col gap-1">
-          <h1 className="text-2xl font-bold tracking-tight text-fg sm:text-3xl">Your private toolbox</h1>
-          <p className="text-muted">
-            {loading ? "Loading tools…" : `${available} tools for PDFs, images, media, documents & AI — running locally.`}
-          </p>
+    <div className="mx-auto max-w-[74rem] space-y-7">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-[clamp(1.85rem,3.3vw,3.15rem)] leading-[1.06] font-bold tracking-[-0.055em] text-fg">Tools</h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted sm:text-base">Find a tool or start with the files you want to work on.</p>
+        </div>
+        <Link to="/recipes" className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-line bg-surface px-3 text-sm font-semibold text-fg hover:bg-surface-2">
+          <BookOpen aria-hidden="true" className="size-4" /> Browse recipes
+        </Link>
+      </header>
+      <section aria-label="Find tools" className="grid gap-3 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+        <div className="rounded-2xl border border-line bg-surface px-4 py-5 sm:p-6">
+          <label htmlFor="tool-query" className="font-semibold text-fg">Search the tool library</label>
+          <div className="relative mt-2">
+            <Search aria-hidden="true" className="pointer-events-none absolute top-3.5 left-3.5 size-4.5 text-muted" />
+            <input
+              id="tool-query"
+              type="search"
+              aria-label="Search tools"
+              placeholder="Try “make PDF smaller”"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="w-full rounded-lg border border-line bg-surface-2 py-3 pr-4 pl-11 text-sm text-fg placeholder:text-muted"
+            />
+          </div>
         </div>
         <div
-          role="button"
-          tabIndex={0}
-          onClick={() => inputRef.current?.click()}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && inputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
-          className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed p-8 text-center transition-colors"
-          style={{
-            borderColor: dragOver ? accentVar("quick") : "var(--color-line)",
-            background: dragOver ? "color-mix(in srgb, var(--color-primary) 8%, transparent)" : "var(--color-surface-2)",
+          onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
+          onDragLeave={(event) => {
+            if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+              setDragOver(false);
+            }
           }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragOver(false);
+            if (event.dataTransfer.files.length) setFiles(Array.from(event.dataTransfer.files));
+          }}
+          className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-5 sm:p-6 ${dragOver ? "border-primary bg-primary-soft" : "border-line bg-primary-soft"}`}
         >
-          <span className="grid h-12 w-12 place-items-center rounded-2xl bg-primary-soft">
-            <Upload className="h-6 w-6 text-primary" />
-          </span>
-          <p className="font-medium text-fg">Drop a file to see what you can do</p>
-          <p className="text-sm text-muted">or click to browse — we&apos;ll suggest the right tools</p>
           <input
             ref={inputRef}
             type="file"
             multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) suggest(Array.from(e.target.files));
-              e.target.value = "";
+            hidden
+            onChange={(event) => {
+              if (event.target.files?.length) setFiles(Array.from(event.target.files));
+              event.target.value = "";
             }}
           />
+          <div>
+            <p className="font-semibold text-fg">Start with files</p>
+            <p className="mt-0.5 text-sm text-muted">Drop files here to see what you can do.</p>
+          </div>
+          <button type="button" onClick={() => inputRef.current?.click()}
+            className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-semibold text-primary-fg transition-opacity hover:opacity-90">
+            <FileUp aria-hidden="true" className="size-4" />
+            {files.length > 0 ? "Choose different files" : "Choose files"}
+          </button>
         </div>
       </section>
 
-      {/* Suggestions */}
-      {drop && (
-        <section className="animate-in mb-8 rounded-2xl border border-line bg-surface p-4 shadow-[var(--shadow-card)]">
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <p className="flex items-center gap-2 text-sm text-fg">
-              <Sparkles className="h-4 w-4 text-primary" />
-              For <span className="font-semibold">{drop.files.map((f) => f.name).join(", ")}</span> you can:
-            </p>
-            <button onClick={() => setDrop(null)} className="grid h-7 w-7 place-items-center rounded-full text-muted hover:bg-surface-2 hover:text-fg">
-              <X className="h-4 w-4" />
+      {files.length > 0 && (
+        <section aria-labelledby="file-tools" className="rounded-xl border border-line bg-surface p-4 sm:p-5">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 id="file-tools" className="font-semibold text-fg">Tools for your files</h2>
+              <p className="mt-1 text-sm text-muted [overflow-wrap:anywhere]">
+                {files.length === 1 ? files[0].name : `${files.length} selected files`}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFiles([])}
+              className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-2 text-sm text-muted hover:bg-surface-2 hover:text-fg"
+            >
+              <X aria-hidden className="size-4" /> Clear files
             </button>
           </div>
-          {drop.matches.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted">No tools match that file type.</p>
-          ) : (
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {drop.matches.map((t) => {
-                const meta = categoryMeta(t.category);
-                const Icon = meta.icon;
-                return (
-                  <button
-                    key={t.slug}
-                    onClick={() => openTool(t.slug)}
-                    className="flex items-center gap-3 rounded-xl border border-line bg-surface-2 p-3 text-left transition-colors hover:border-primary"
-                  >
-                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar(meta.accent)} 14%, transparent)` }}>
-                      <Icon className="h-4.5 w-4.5" style={{ color: accentVar(meta.accent) }} />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium text-fg">{t.name}</span>
-                      <span className="block truncate text-xs text-muted">{t.description}</span>
-                    </span>
-                  </button>
-                );
-              })}
+          {loading && <p role="status" className="text-sm text-muted">Checking compatible tools…</p>}
+          {!loading && !error && matches.length === 0 && (
+            <p role="status" className="text-sm text-muted">
+              No tool can use this selection. Try choosing files of the same type or one file at a time.
+            </p>
+          )}
+          {matches.length > 0 && (
+            <div className={grid}>
+              {matches.map(({ tool, mode }) => (
+                <button
+                  type="button"
+                  key={tool.slug}
+                  onClick={() => navigate(mode === "batch" ? "/batch" : `/tool/${tool.slug}`, {
+                    state: { presetFiles: files, presetSlug: tool.slug },
+                  })}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-line px-3 py-2.5 text-left text-sm hover:border-primary hover:bg-surface-2"
+                >
+                  <span>
+                    <span className="block font-medium">{tool.name}</span>
+                    {mode === "batch" && <span className="block text-xs text-muted">Run on each file</span>}
+                  </span>
+                  <ArrowRight aria-hidden className="size-4 shrink-0 text-muted" />
+                </button>
+              ))}
             </div>
           )}
         </section>
       )}
 
-      {/* Favorites & recents */}
-      {!query && favTools.length > 0 && (
-        <section className="mb-8">
-          <div className="mb-3 flex items-center gap-2.5">
-            <span className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar("img")} 14%, transparent)` }}>
-              <Star className="h-4.5 w-4.5" style={{ color: accentVar("img") }} fill="currentColor" />
-            </span>
-            <h3 className="font-semibold text-fg">Favorites</h3>
-            <span className="text-sm text-faint">{favTools.length}</span>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {favTools.map((t) => (
-              <ToolCard key={t.slug} tool={t} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {!query && recentTools.length > 0 && (
-        <section className="mb-8">
-          <div className="mb-3 flex items-center gap-2.5">
-            <span className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar("util")} 14%, transparent)` }}>
-              <Clock className="h-4.5 w-4.5" style={{ color: accentVar("util") }} />
-            </span>
-            <h3 className="font-semibold text-fg">Recent</h3>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {recentTools.map((t) => (
-              <ToolCard key={t.slug} tool={t} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Search */}
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-fg">All tools</h2>
-        <div className="relative w-full max-w-xs">
-          <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-faint" />
-          <input
-            type="search"
-            placeholder="Search tools…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="w-full rounded-full border border-line bg-surface py-2 pl-9 pr-3 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-primary"
-          />
+      <section aria-label="Browse tools">
+        <div role="group" aria-label="Filter tools" className="flex flex-wrap gap-2">
+          {filters.map(({ key, label, ...meta }) => {
+            const Icon = "icon" in meta ? meta.icon : undefined;
+            return (
+              <button
+                type="button"
+                key={key}
+                aria-pressed={category === key}
+                onClick={() => setCategory(category === key ? "browse" : key)}
+                className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg border px-3 text-sm font-semibold transition-colors ${category === key ? "border-primary bg-primary text-primary-fg" : "border-line bg-surface text-muted hover:border-primary hover:text-fg"}`}
+              >
+                {Icon && <Icon aria-hidden className="size-4" />}
+                {label}
+              </button>
+            );
+          })}
         </div>
-      </div>
+        {loading && <div className="mt-5"><CardGridSkeleton count={6} /></div>}
+        {error && (
+          <div role="status" className="mt-5 flex flex-wrap items-center gap-3 text-sm">
+            <p className="text-danger">{error}</p>
+            <button type="button" onClick={() => setAttempt((value) => value + 1)} className="font-medium text-primary underline">
+              Try again
+            </button>
+          </div>
+        )}
+        {!loading && !error && !isBrowsing && (
+          visible.length > 0
+            ? (
+              <div className="mt-6">
+                <h2 className="mb-3 text-lg font-semibold tracking-tight">{query.trim() ? "Matching tools" : filters.find((filter) => filter.key === category)?.label}</h2>
+                <div className={grid}>{visible.map((tool) => <ToolCard key={tool.slug} tool={tool} />)}</div>
+              </div>
+            )
+            : <p role="status" className="mt-5 text-sm text-muted">
+                {category === "saved" && !query ? "Star a tool to save it here." : "No tools match your search."}
+              </p>
+        )}
+      </section>
 
-      {error && (
-        <p className="rounded-xl border border-line bg-surface px-3 py-2 text-sm text-danger">{error}</p>
+      {isBrowsing && frequent.length > 0 && (
+        <section aria-labelledby="common-tasks">
+          <h2 id="common-tasks" className="mb-3 text-lg font-semibold tracking-tight">Suggested tools</h2>
+          <div className={grid}>
+            {frequent.map((tool) => tool && <ToolCard key={tool.slug} tool={tool} />)}
+          </div>
+        </section>
       )}
-      {loading && <CardGridSkeleton count={12} />}
-      {!loading && !error && grouped.length === 0 && (
-        <p className="text-sm text-muted">No tools match your search.</p>
+
+      {isBrowsing && recent.length > 0 && (
+        <section aria-labelledby="recent-tools">
+          <h2 id="recent-tools" className="mb-3 text-lg font-semibold tracking-tight">Recently opened</h2>
+          <div className="flex flex-wrap gap-2">
+            {recent.map((tool) => tool && (
+              <Link key={tool.slug} to={`/tool/${tool.slug}`} className="rounded-lg border border-line bg-surface px-3 py-2 text-sm hover:border-primary">
+                {tool.name}
+              </Link>
+            ))}
+          </div>
+        </section>
       )}
 
-      {grouped.map(({ category, tools: catTools }) => {
-        const meta = categoryMeta(category);
-        const Icon = meta.icon;
-        return (
-          <section key={category} className="mb-8">
-            <div className="mb-3 flex items-center gap-2.5">
-              <span className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `color-mix(in srgb, ${accentVar(meta.accent)} 14%, transparent)` }}>
-                <Icon className="h-4.5 w-4.5" style={{ color: accentVar(meta.accent) }} />
-              </span>
-              <h3 className="font-semibold text-fg">{meta.label}</h3>
-              <span className="text-sm text-faint">{catTools.length}</span>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {catTools.map((t) => (
-                <ToolCard key={t.slug} tool={t} />
-              ))}
-            </div>
-          </section>
-        );
-      })}
-
-      {/* Quick tools teaser */}
-      <button
-        onClick={() => navigate("/quick-tools")}
-        className="flex w-full items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-[var(--shadow-card)] transition-all hover:-translate-y-0.5 hover:shadow-[var(--shadow-pop)]"
-      >
-        <span className="grid h-11 w-11 place-items-center rounded-xl" style={{ background: `color-mix(in srgb, ${accentVar("quick")} 14%, transparent)` }}>
-          <Boxes className="h-5 w-5" style={{ color: accentVar("quick") }} />
-        </span>
-        <span>
-          <span className="block font-semibold text-fg">Quick Tools</span>
-          <span className="block text-sm text-muted">Hundreds of instant in-browser utilities — encoders, converters, formatters & more.</span>
-        </span>
-      </button>
+      <Link to="/quick-tools" className="inline-flex items-center gap-2 text-sm font-medium text-muted hover:text-fg">
+        <Boxes aria-hidden className="size-4" /> Quick tools <ArrowRight aria-hidden className="size-4" />
+      </Link>
     </div>
   );
 }

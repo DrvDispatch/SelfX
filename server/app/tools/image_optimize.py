@@ -1,6 +1,8 @@
 """image-optimize: shrink an image's file size by re-encoding it efficiently (Pillow)."""
 
+from contextlib import ExitStack
 from io import BytesIO
+from shutil import copyfile
 
 from PIL import Image
 
@@ -21,7 +23,7 @@ class ImageOptimize(Tool):
     slug = "image-optimize"
     name = "Optimize image"
     category = "images"
-    description = "Reduce an image's file size by re-encoding it (keeps the same format)."
+    description = "Reduce an image's file size. JPEG and WebP can use a strict size limit."
     accepts = [".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".heic", ".heif"]
     multi_file = False
     min_files = 1
@@ -60,7 +62,9 @@ class ImageOptimize(Tool):
     def run(self, ctx: ToolContext) -> None:
         quality = int(ctx.params.get("quality", 75))
         target_kb = ctx.params.get("target_kb")
+        target = int(target_kb) * 1024 if target_kb else None
         src = ctx.input_paths[0]
+        before = src.stat().st_size
         # Determine the true source format from the file header BEFORE load_image:
         # load_image bakes in EXIF orientation via ImageOps.exif_transpose, which
         # always returns a fresh copy whose .format is None. Reading img.format after
@@ -72,14 +76,9 @@ class ImageOptimize(Tool):
         except Exception:
             fmt = ""
         # load_image applies EXIF orientation and guards against decompression bombs
-        img = load_image(src)
         # normalise to a widely-supported output; keep the original extension where sensible
         if fmt in ("JPEG", "JPG", "MPO"):
             ext, save_fmt = "jpg", "JPEG"
-            # keep single-channel greyscale as L (RGB would triple the size); only
-            # normalise alpha / palette / CMYK to RGB, compositing onto white.
-            if img.mode not in ("RGB", "L"):
-                img = flatten_rgb(img)
             kw = {"quality": quality, "optimize": True, "progressive": True}
         elif fmt == "WEBP":
             ext, save_fmt, kw = "webp", "WEBP", {"quality": quality, "method": 6}
@@ -93,54 +92,54 @@ class ImageOptimize(Tool):
                     pass
 
         out = ctx.output_dir / f"{src.stem}-optimized.{ext}"
+        original = ctx.output_dir / f"{src.stem}-optimized{src.suffix.lower()}"
+        if target and save_fmt not in ("JPEG", "WEBP"):
+            raise ToolError("A target size needs a JPEG or WebP input. Convert this image first.")
 
-        # Optional target-size mode: for lossy formats, binary-search the highest
-        # quality whose encoded size fits under target_kb. Falls back to the lowest
-        # quality if even that overshoots. Lossless PNG has no quality knob, so it
-        # is left untouched by this loop.
-        chosen_bytes = None
-        if target_kb and save_fmt in ("JPEG", "WEBP"):
-            try:
-                target_bytes = int(target_kb) * 1024
-            except (TypeError, ValueError):
-                target_bytes = 0
-            if target_bytes > 0:
-                def _encode(q: int) -> bytes:
-                    buf = BytesIO()
-                    img.save(buf, save_fmt, **{**kw, "quality": max(1, min(100, q))})
-                    return buf.getvalue()
-
-                lo, hi = 5, quality
-                best = None
-                while lo <= hi:
-                    mid = (lo + hi) // 2
-                    data = _encode(mid)
-                    if len(data) <= target_bytes:
-                        best = data
-                        lo = mid + 1
-                    else:
-                        hi = mid - 1
-                chosen_bytes = best if best is not None else _encode(5)
-
-        if chosen_bytes is not None:
-            out.write_bytes(chosen_bytes)
-        else:
-            img.save(out, save_fmt, **kw)
-        img.close()
-        before = src.stat().st_size
+        with ExitStack() as stack:
+            img = stack.enter_context(load_image(src))
+            if target and before <= target:
+                copyfile(src, original)
+                ctx.progress(1.0, f"original already fits under {target_kb} KB")
+                return
+            if save_fmt == "JPEG" and img.mode not in ("RGB", "L"):
+                img = stack.enter_context(flatten_rgb(img))
+            if target:
+                out.write_bytes(_fit_target(img, save_fmt, kw, quality, target))
+            else:
+                img.save(out, save_fmt, **kw)
         after = out.stat().st_size
 
-        # Never hand back a bigger file than the input: if the re-encode didn't
-        # actually shrink it, return the original bytes unchanged instead.
         if before and after >= before:
-            orig_ext = (src.suffix.lstrip(".").lower() or ext)
-            fallback = ctx.output_dir / f"{src.stem}-optimized.{orig_ext}"
-            fallback.write_bytes(src.read_bytes())
-            if fallback != out:
+            copyfile(src, original)
+            if original != out:
                 out.unlink(missing_ok=True)
-            after = fallback.stat().st_size
             ctx.progress(1.0, f"already optimal: kept original ({before} bytes)")
             return
 
         pct = int((1 - after / before) * 100) if before else 0
         ctx.progress(1.0, f"optimized: {before} -> {after} bytes ({pct}% smaller)")
+
+
+def _fit_target(img, save_fmt: str, options: dict, quality: int, target: int) -> bytes:
+    def encode(quality: int) -> bytes:
+        with BytesIO() as buffer:
+            img.save(buffer, save_fmt, **{**options, "quality": quality})
+            return buffer.getvalue()
+
+    full = encode(quality)
+    if len(full) <= target:
+        return full
+    best = None
+    lower, upper = 1, quality - 1
+    while lower <= upper:
+        mid = (lower + upper) // 2
+        candidate = encode(mid)
+        if len(candidate) <= target:
+            best = candidate
+            lower = mid + 1
+        else:
+            upper = mid - 1
+    if best is None:
+        raise ToolError("This image cannot fit under the chosen limit. Resize it or increase the limit.")
+    return best

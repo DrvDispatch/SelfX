@@ -60,7 +60,7 @@ class AudioSummary(Tool):
         return _ollama.is_available()
 
     def run(self, ctx: ToolContext) -> None:
-        from .transcribe import _get_model, _resolve_language, _ts
+        from .transcribe import _get_model, _resolve_language, _select_model, _ts
 
         length = str(ctx.params.get("length", "medium"))
         instruction = _PROMPT.get(length, _PROMPT["medium"])
@@ -69,7 +69,7 @@ class AudioSummary(Tool):
         lang = _resolve_language(language)  # validates; raises a clear ToolError
         src = ctx.input_paths[0]
         ctx.progress(0.15, "transcribing audio")
-        model = _get_model("large-v3-turbo")
+        model = _get_model(_select_model("", "transcribe"))
         segments, info = model.transcribe(str(src), language=lang, vad_filter=True)
         segs = list(segments)
         transcript = " ".join(s.text.strip() for s in segs).strip()

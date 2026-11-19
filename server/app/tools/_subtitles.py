@@ -35,7 +35,8 @@ def detect_encoding(path: Path, sample_bytes: int = 262144) -> str | None:
     """Best-effort charset detection. Returns a Python codec name (e.g. 'cp1256',
     'utf-16') or None if it can't be determined. Never raises."""
     try:
-        raw = path.read_bytes()[:sample_bytes]
+        with path.open("rb") as subtitle_file:
+            raw = subtitle_file.read(sample_bytes)
     except Exception:
         return None
     if not raw:

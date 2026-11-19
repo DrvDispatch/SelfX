@@ -16,7 +16,7 @@ QUEUE_NAMES = ("default", "heavy")
 # subscribes to for live progress (replaces client-side polling).
 JOB_EVENTS_CHANNEL = "selfx:job-events"
 
-redis_conn = Redis.from_url(settings.redis_url)
+redis_conn = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
 
 _queues: dict[str, Queue] = {}
 
@@ -90,6 +90,18 @@ def enqueue_kb_ingest(document_id: uuid.UUID | str) -> str:
     )
     logger.info("kb document %s ingest enqueued (rq id %s)", document_id, rq_job.id)
     return rq_job.id
+
+
+def enqueue_workflow(job_id: uuid.UUID, attempt: int, task_id: str) -> None:
+    get_queue("heavy").enqueue(
+        "app.worker.run_workflow",
+        str(job_id), attempt,
+        job_id=task_id,
+        job_timeout=settings.job_timeout_seconds,
+        result_ttl=3600,
+        failure_ttl=86400,
+        description=f"selfx workflow {job_id}",
+    )
 
 
 def cancel_rq_job(rq_job_id: str) -> None:

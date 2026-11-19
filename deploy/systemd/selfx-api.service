@@ -1,0 +1,26 @@
+[Unit]
+Description=SelfX web application and API
+Wants=network-online.target
+Requires=postgresql.service selfx-redis.service
+After=network-online.target postgresql.service selfx-redis.service
+
+[Service]
+User=selfx
+Group=selfx
+WorkingDirectory=/opt/selfx/current/server
+EnvironmentFile=/etc/selfx/selfx.env
+Environment=HOME=/var/lib/selfx PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=PATH=/opt/selfx/current/venv/bin:/usr/bin:/bin
+Environment=WEB_DIST=/opt/selfx/current/web
+ExecStart=/opt/selfx/current/venv/bin/python -m uvicorn app.main:app --host ${SELFX_BIND_HOST} --port ${SELFX_PORT}
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/selfx
+
+[Install]
+WantedBy=multi-user.target

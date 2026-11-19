@@ -29,6 +29,7 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ghostscript \
+      fonts-dejavu-core \
       tesseract-ocr \
       tesseract-ocr-eng \
       tesseract-ocr-deu \
@@ -43,8 +44,8 @@ RUN apt-get update \
 
 # Non-root user; /data is the volume mount point for uploads/outputs/tmp.
 RUN useradd --create-home --shell /usr/sbin/nologin --uid 1000 selfx \
- && mkdir -p /data/uploads /data/outputs /data/tmp \
- && chown -R selfx:selfx /data
+ && mkdir -p /data/uploads /data/outputs /data/tmp /models/huggingface \
+ && chown -R selfx:selfx /data /models
 
 COPY --from=builder /opt/venv /opt/venv
 

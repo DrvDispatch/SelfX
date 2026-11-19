@@ -1,21 +1,27 @@
+import { lazy } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, RequireAdmin, RequireAuth } from "./auth";
 import { ThemeProvider } from "./theme";
 import { ToastProvider } from "./components/Toast";
 import { ConfirmProvider } from "./components/ConfirmDialog";
 import Layout from "./components/Layout";
-import Admin from "./pages/Admin";
-import Agent from "./pages/Agent";
-import Batch from "./pages/Batch";
-import Dashboard from "./pages/Dashboard";
-import Jobs from "./pages/Jobs";
-import KnowledgeBase from "./pages/KnowledgeBase";
+import Create from "./pages/Create";
 import Login from "./pages/Login";
-import Models from "./pages/Models";
-import PasteImage from "./pages/PasteImage";
-import Pipeline from "./pages/Pipeline";
-import QuickTools from "./pages/QuickTools";
-import ToolPage from "./pages/ToolPage";
+
+const Admin = lazy(() => import("./pages/Admin"));
+const Agent = lazy(() => import("./pages/Agent"));
+const Batch = lazy(() => import("./pages/Batch"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const KnowledgeBase = lazy(() => import("./pages/KnowledgeBase"));
+const Models = lazy(() => import("./pages/Models"));
+const PasteImage = lazy(() => import("./pages/PasteImage"));
+const Pipeline = lazy(() => import("./pages/Pipeline"));
+const QuickTools = lazy(() => import("./pages/QuickTools"));
+const Recipes = lazy(() => import("./pages/Recipes"));
+const TranscriptEditor = lazy(() => import("./pages/TranscriptEditor"));
+const ToolPage = lazy(() => import("./pages/ToolPage"));
+const WorkflowRun = lazy(() => import("./pages/WorkflowRun"));
 
 export default function App() {
   return (
@@ -33,7 +39,11 @@ export default function App() {
                 </RequireAuth>
               }
             >
-              <Route path="/" element={<Dashboard />} />
+              <Route path="/" element={<Create />} />
+              <Route path="/tools" element={<Dashboard />} />
+              <Route path="/recipes" element={<Recipes />} />
+              <Route path="/runs/:id" element={<WorkflowRun />} />
+              <Route path="/runs/:id/transcript/:fileId" element={<TranscriptEditor />} />
               <Route path="/assistant" element={<Agent />} />
               <Route path="/knowledge" element={<KnowledgeBase />} />
               <Route path="/paste" element={<PasteImage />} />

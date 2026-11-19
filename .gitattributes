@@ -1,0 +1,3 @@
+deploy/install.sh text eol=lf
+deploy/systemd/* text eol=lf
+deploy/selfx-wsl-keepalive.vbs text eol=crlf

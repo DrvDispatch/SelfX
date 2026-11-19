@@ -178,17 +178,41 @@ export function uploadFileWithProgress(
 }
 
 /** Fetches a file's bytes with the auth header (for inline previews). */
-export async function fetchFileBlob(id: string): Promise<Blob> {
+export async function fetchFileBlob(id: string, options?: { signal?: AbortSignal; maxBytes?: number }): Promise<Blob> {
   const headers = new Headers();
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(`${BASE}/files/${id}/download`, { headers });
+  const res = await fetch(`${BASE}/files/${encodeURIComponent(id)}/download`, { headers, signal: options?.signal });
   if (res.status === 401) {
     handleUnauthorized();
     throw new ApiError(401, "Session expired");
   }
   if (!res.ok) throw new ApiError(res.status, await errorDetail(res));
-  return res.blob();
+  const limit = options?.maxBytes;
+  if (limit === undefined) return res.blob();
+  if (Number(res.headers.get("Content-Length")) > limit) {
+    await res.body?.cancel();
+    throw new ApiError(413, "This file is too large for in-browser preview.");
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return new Blob();
+  const parts: BlobPart[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new ApiError(413, "This file is too large for in-browser preview.");
+      }
+      parts.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new Blob(parts, { type: res.headers.get("Content-Type") ?? "" });
 }
 
 /** Fetches a file with the auth header and triggers a browser download. */
@@ -236,6 +260,76 @@ export function createJob(
   );
 }
 
+export interface WorkflowRunRequest {
+  file_id: string;
+  language: string;
+  title?: string;
+  prompt?: string;
+}
+
+export function createWorkflowRun(input: WorkflowRunRequest, idempotencyKey: string): Promise<Job> {
+  return submitWorkflow("/workflow-runs", input, idempotencyKey);
+}
+
+export function getWorkflowRun(id: string, signal?: AbortSignal): Promise<Job> {
+  return request<Job>(`/workflow-runs/${encodeURIComponent(id)}`, { signal });
+}
+
+export function retryWorkflowRun(id: string): Promise<Job> {
+  return request<Job>(`/workflow-runs/${encodeURIComponent(id)}/retry`, { method: "POST" });
+}
+
+export interface WorkflowPlannerStatus {
+  available: boolean;
+  model: string | null;
+}
+
+export function getWorkflowPlanner(signal?: AbortSignal): Promise<WorkflowPlannerStatus> {
+  return request<WorkflowPlannerStatus>("/workflow-runs/planner", { signal });
+}
+
+export interface WorkflowPlan {
+  steps: { id: string; action: string; input: string; params: Record<string, unknown> }[];
+}
+
+export interface WorkflowAction {
+  slug: string;
+  name: string;
+  input_extensions: string[];
+  outputs: { role: string; extensions: string[]; format_parameter?: string }[];
+  params_schema: {
+    properties: Record<string, {
+      type: string;
+      default?: unknown;
+      enum?: unknown[];
+      minimum?: number;
+      maximum?: number;
+      maxLength?: number;
+      pattern?: string;
+    }>;
+    required: string[];
+  };
+}
+
+export function getWorkflowCatalog(signal?: AbortSignal): Promise<WorkflowAction[]> {
+  return request<WorkflowAction[]>("/workflow-runs/catalog", { signal });
+}
+
+export function draftWorkflowPlan(prompt: string, fileId: string): Promise<WorkflowPlan> {
+  return request("/workflow-runs/plan", jsonInit("POST", { prompt, file_id: fileId }));
+}
+
+export function executeWorkflowPlan(fileId: string, plan: WorkflowPlan, idempotencyKey: string): Promise<Job> {
+  return submitWorkflow("/workflow-runs/execute", { file_id: fileId, plan }, idempotencyKey);
+}
+
+function submitWorkflow(path: string, body: unknown, idempotencyKey: string): Promise<Job> {
+  const init = jsonInit("POST", body);
+  const headers = new Headers(init.headers);
+  headers.set("Idempotency-Key", idempotencyKey);
+  return request<Job>(path, { ...init, headers });
+}
+
 /** Run one single-file tool over many files; outputs come back as one zip. */
 export function createBatchJob(
   tool: string,
@@ -264,8 +358,10 @@ export function createPipelineJob(
   );
 }
 
-export function listJobs(limit = 50, offset = 0): Promise<JobList> {
-  return request<JobList>(`/jobs?limit=${limit}&offset=${offset}`);
+export function listJobs(
+  limit = 50, offset = 0, state: "all" | "active" | "done" | "error" = "all", signal?: AbortSignal,
+): Promise<JobList> {
+  return request<JobList>(`/jobs?limit=${limit}&offset=${offset}&state=${state}`, { signal });
 }
 
 export interface JobEvent {
@@ -475,7 +571,7 @@ export interface AgentStep {
   result: {
     ok?: boolean;
     status?: string;
-    error?: string;
+    error?: string | null;
     outputs?: { id: string; name: string; size: number }[];
   } & Record<string, unknown>;
 }
@@ -504,6 +600,29 @@ export interface OllamaModel {
   size: number;
   details?: { parameter_size?: string; quantization_level?: string };
 }
+
+export interface ModelHardware {
+  scope: "api_host" | "api_container";
+  scope_note: string;
+  os: string;
+  architecture: string;
+  effective_cpu_cores: number;
+  memory_total_bytes: number | null;
+  memory_available_bytes: number | null;
+  disk_free_bytes: number | null;
+  nvidia_gpus: { total_bytes: number; free_bytes: number }[] | null;
+  recommendation: {
+    kind: "estimate";
+    model: string | null;
+    context_tokens: number | null;
+    note: string;
+  };
+}
+
+export function getModelHardware(signal?: AbortSignal): Promise<ModelHardware> {
+  return request<ModelHardware>("/admin/models/hardware", { signal });
+}
+
 export function listModels(): Promise<{ models: OllamaModel[]; pulling: string[] }> {
   return request<{ models: OllamaModel[]; pulling: string[] }>("/admin/models");
 }

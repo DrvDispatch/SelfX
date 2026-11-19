@@ -6,6 +6,7 @@ interface Props {
   values: Record<string, unknown>;
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
+  optionLabels?: Record<string, Record<string, string>>;
 }
 
 const inputClass =
@@ -19,6 +20,7 @@ function Field({
   value,
   onChange,
   disabled,
+  optionLabels,
 }: {
   name: string;
   prop: ParamProperty;
@@ -26,6 +28,7 @@ function Field({
   value: unknown;
   onChange: (value: unknown) => void;
   disabled: boolean;
+  optionLabels?: Record<string, string>;
 }) {
   const label = prop.title ?? name;
   const id = `param-${name}`;
@@ -56,7 +59,7 @@ function Field({
         )}
         {prop.enum.map((opt) => (
           <option key={String(opt)} value={String(opt)}>
-            {String(opt)}
+            {optionLabels?.[String(opt)] ?? String(opt)}
           </option>
         ))}
       </select>
@@ -148,6 +151,7 @@ export default function ParamsForm({
   values,
   onChange,
   disabled = false,
+  optionLabels,
 }: Props) {
   const properties = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
@@ -168,6 +172,7 @@ export default function ParamsForm({
           value={values[name]}
           onChange={(v) => onChange(name, v)}
           disabled={disabled}
+          optionLabels={optionLabels?.[name]}
         />
       ))}
     </div>

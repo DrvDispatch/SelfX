@@ -1,48 +1,18 @@
-# SelfX on a VPS (short version — full walkthrough in docs/REPORT.md)
+# Access SelfX on a VPS
 
-Prerequisites: a VPS with Docker Engine + the compose plugin, and a domain you control.
+Install SelfX on Ubuntu 24.04 using the [native setup guide](../docs/SELF_HOSTING.md#ubuntu-2404). The default listener is `127.0.0.1:8800` on the VPS. An SSH tunnel lets you open it from your own browser without a domain or a public SelfX port.
 
-## 1. DNS
+1. Verify that you can sign in to the VPS over SSH. Keep your provider’s firewall restricted to the SSH access you need. Leave the SelfX, PostgreSQL, Redis, and Ollama ports private.
+2. From your own computer, open a terminal and run the command below, substituting your SSH account and server address. The second `8800` is the port you chose on the VPS. Change the first `8800` if a different app already uses that port on your computer.
 
-Create an `A` (and optionally `AAAA`) record for your domain pointing at the VPS IP,
-e.g. `selfx.example.com → 203.0.113.10`. Wait until it resolves before starting the
-proxy — Caddy needs it for the Let's Encrypt challenge.
+   ```sh
+   ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8800:127.0.0.1:8800 account@your-server
+   ```
 
-## 2. Clone + harden .env
+3. Keep the SSH session open and visit [http://127.0.0.1:8800](http://127.0.0.1:8800). Sign into SelfX with your bootstrap administrator account. Close the terminal when you are done.
 
-```bash
-git clone <your-repo-url> selfx && cd selfx
-cp .env.example .env
-```
+SSH encrypts traffic along the network path between your computer and the VPS. Both HTTP listeners in this example are on loopback. [OpenSSH port forwarding](https://man.openbsd.org/ssh#L)
 
-Edit `.env` — at minimum:
+If the browser cannot reach SelfX, first run `curl -fsS http://127.0.0.1:8800/api/v1/healthz` on the VPS using the port you installed. If the health check passes and SSH reports “administratively prohibited,” ask your VPS administrator whether local forwarding is allowed for your account. See [service checks](../docs/SELF_HOSTING.md#service-checks) for a failed health check.
 
-- `SELFX_SECRET_KEY` — long random value: `openssl rand -hex 32`
-- `SELFX_ADMIN_PASSWORD` — strong bootstrap admin password
-- `POSTGRES_PASSWORD` — random value, and mirror it inside `DATABASE_URL`
-- `SELFX_DOMAIN` — the domain from step 1 (e.g. `selfx.example.com`)
-
-## 3. Start with the TLS proxy
-
-```bash
-docker compose --profile proxy up -d --build
-# add more profiles as needed, e.g.:
-docker compose --profile proxy --profile ai --profile security up -d --build
-```
-
-Caddy publishes 80/443, obtains a certificate automatically, and proxies to `web:80`.
-Browse to `https://<SELFX_DOMAIN>` and log in with the bootstrap admin.
-
-## 4. Firewall
-
-Allow only SSH + HTTP(S):
-
-```bash
-ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw enable
-```
-
-Note: Docker publishes ports via iptables directly, so ufw does NOT block them.
-The core `web` service publishes `8080:80`; on a public VPS either leave it (harmless
-but redundant next to Caddy) or bind it to loopback by changing the mapping in
-`docker-compose.yml` to `"127.0.0.1:8080:80"`. `stirling` (`extras` profile,
-`8081:8080`) has no auth of its own — bind it to loopback too if you enable it.
+For a shared deployment, keep SelfX behind an access-controlled private network or reverse proxy and terminate HTTPS at the proxy. Keep the frontend and `/api` on the same origin. Review access, upload limits, retention, and resource capacity before inviting other users.

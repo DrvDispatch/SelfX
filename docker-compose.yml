@@ -12,18 +12,40 @@ x-server-env: &server-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   DATA_DIR: ${DATA_DIR:-/data}
   MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-512}
+  MAX_OUTPUT_MB: ${MAX_OUTPUT_MB:-1024}
   FILE_RETENTION_HOURS: ${FILE_RETENTION_HOURS:-24}
   JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-1800}
   RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
   GOTENBERG_URL: ${GOTENBERG_URL:-http://gotenberg:3000}
   OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
   OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+  OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30s}
+  OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-16384}
+  KB_EMBED_MODEL: ${KB_EMBED_MODEL:-nomic-embed-text}
+  KB_EMBED_DIM: ${KB_EMBED_DIM:-768}
   WHISPER_MODEL: ${WHISPER_MODEL:-small}
   WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
   WHISPER_COMPUTE: ${WHISPER_COMPUTE:-int8}
+  WHISPER_LOCAL_ONLY: ${WHISPER_LOCAL_ONLY:-false}
+  WHISPERX_PYTHON: ${WHISPERX_PYTHON:-/root/whisperx-venv/bin/python}
+  HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
   CLAMAV_ENABLED: ${CLAMAV_ENABLED:-false}
   CLAMAV_HOST: ${CLAMAV_HOST:-clamav}
   CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+
+x-worker-service: &worker-service
+  build: ./server
+  image: selfx-server
+  restart: unless-stopped
+  volumes:
+    - selfx_data:/data
+  security_opt:
+    - no-new-privileges:true
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
 
 services:
   web:
@@ -31,7 +53,7 @@ services:
     image: selfx-web
     restart: unless-stopped
     ports:
-      - "8080:80" # the ONLY published port of the core stack
+      - "${SELFX_BIND_HOST:-127.0.0.1}:${SELFX_WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy
@@ -41,14 +63,24 @@ services:
     image: selfx-server
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    environment: *server-env
+    environment:
+      <<: *server-env
+      SELFX_AGENT_PROVIDER: ${SELFX_AGENT_PROVIDER:-ollama}
+      SELFX_PLANNER_MODEL: ${SELFX_PLANNER_MODEL:-}
+      SELFX_PLANNER_NUM_CTX: ${SELFX_PLANNER_NUM_CTX:-8192}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_USE_VERTEX: ${GEMINI_USE_VERTEX:-false}
+      GEMINI_PROJECT: ${GEMINI_PROJECT:-}
+      GEMINI_LOCATION: ${GEMINI_LOCATION:-us-central1}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
     volumes:
       - selfx_data:/data
     security_opt:
       - no-new-privileges:true
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -64,23 +96,35 @@ services:
       retries: 5
       start_period: 20s
 
-  worker:
-    build: ./server # same image as api; compose builds it once
+  migrate:
+    build: ./server
     image: selfx-server
-    restart: unless-stopped
-    command: python -m app.worker
-    environment: *server-env
-    volumes:
-      - selfx_data:/data
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: ${WORKER_MEM_LIMIT:-6g}
-    shm_size: 1g
+    restart: "no"
+    command: python -m app.migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://selfx:selfx@db:5432/selfx}
+      KB_EMBED_DIM: ${KB_EMBED_DIM:-768}
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+
+  worker:
+    <<: *worker-service
+    command: python -m app.worker heavy
+    environment:
+      <<: *server-env
+      HF_HOME: /models/huggingface
+    volumes:
+      - selfx_data:/data
+      - whisper_models:/models/huggingface
+    mem_limit: ${WORKER_MEM_LIMIT:-6g}
+    shm_size: 1g
+
+  worker-quick:
+    <<: *worker-service
+    command: python -m app.worker default
+    environment: *server-env
+    mem_limit: ${WORKER_QUICK_MEM_LIMIT:-2g}
 
   db:
     image: pgvector/pgvector:pg16
@@ -92,7 +136,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -116,6 +160,8 @@ services:
     image: ollama/ollama
     restart: unless-stopped
     profiles: [ai]
+    environment:
+      OLLAMA_NO_CLOUD: "1"
     volumes:
       - ollama:/root/.ollama
 
@@ -124,7 +170,7 @@ services:
     restart: unless-stopped
     profiles: [extras]
     ports:
-      - "8081:8080"
+      - "127.0.0.1:${SELFX_STIRLING_PORT:-8081}:8080"
 
   clamav:
     image: clamav/clamav:stable
@@ -151,6 +197,7 @@ services:
 volumes:
   pgdata:
   selfx_data:
+  whisper_models:
   ollama:
   caddy_data: # Let's Encrypt certificates survive restarts
   caddy_config:

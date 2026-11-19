@@ -140,48 +140,52 @@ def available(self) -> tuple[bool, str | None]:
     return True, None          # or: return False, "Ollama is not reachable"
 ```
 
-`ffmpeg` is baked into the server image (installed via apt in `server/Dockerfile`,
-alongside ghostscript, tesseract, qpdf, pandoc, exiftool), so the default
-`return True, None` is fine here. If you need a new apt package, add it to the
-`apt-get install` line in `server/Dockerfile` — that is the one exception to "no
-other file edits".
+`ffmpeg` is installed by [the native installer](../deploy/install.sh) along with
+Ghostscript, Tesseract, qpdf, Pandoc, and ExifTool. Add new required Ubuntu
+packages to the installer's package list and Python dependencies to
+[`server/requirements.txt`](../server/requirements.txt).
 
 ## 3. Test it
 
-Rebuild and restart api + worker (both run the same image):
+From your checkout on an Ubuntu or WSL2 test host, deploy the edited adapter
+with the [native installer](SELF_HOSTING.md#ubuntu-2404). Wait for any existing
+jobs to finish before reinstalling.
 
 ```bash
-docker compose up -d --build api worker
+sudo bash deploy/install.sh
 ```
 
-1. **Is it registered?** `GET /api/v1/tools` should list it:
+Install `jq` with `sudo apt install jq` if you want to run the shell examples.
+
+1. Open **Tools** and check that the new tool appears. You can also query the
+   catalog from a shell using your configured port and a test admin account.
 
    ```bash
-   TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+   BASE_URL=http://127.0.0.1:8800
+   TOKEN=$(curl -s -X POST "$BASE_URL/api/v1/auth/login" \
      -H 'Content-Type: application/json' \
      -d '{"username":"admin","password":"<your password>"}' | jq -r .access_token)
-   curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/tools \
+   curl -s -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/tools" \
      | jq '.[] | select(.slug=="video-thumbnail")'
    ```
 
-2. **End to end via the API** (or just use the UI: dashboard → card → drop a file → Run):
+2. Open the tool, drop in a file, and run it. To exercise the same path through
+   the API, use a sample clip in your current directory.
 
    ```bash
    FILE_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-     -F "file=@sample.mp4" http://localhost:8080/api/v1/files | jq -r .id)
+     -F "file=@sample.mp4" "$BASE_URL/api/v1/files" | jq -r .id)
    JOB_ID=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d "{\"tool\":\"video-thumbnail\",\"file_ids\":[\"$FILE_ID\"],\"params\":{\"timestamp\":3}}" \
-     http://localhost:8080/api/v1/jobs | jq -r .id)
-   curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/jobs/$JOB_ID | jq .
+     "$BASE_URL/api/v1/jobs" | jq -r .id)
+   curl -s -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/jobs/$JOB_ID" | jq .
    ```
 
    When `status` is `done`, download the output file listed under `output_files`
    via `GET /api/v1/files/{id}/download`.
 
-3. **Worker logs** if anything goes wrong: `docker compose logs -f worker`.
-
-For fast iteration without image rebuilds, run api + worker locally against the
-compose db/redis — see "Local development" in the [README](../README.md).
+3. Check worker logs with
+   `sudo journalctl -u selfx-worker@default -u selfx-worker@heavy -f`.
 
 ## 4. Checklist
 

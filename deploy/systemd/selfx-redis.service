@@ -1,0 +1,22 @@
+[Unit]
+Description=SelfX private Redis job queue
+
+[Service]
+Type=notify
+User=selfx
+Group=selfx
+RuntimeDirectory=selfx-redis
+RuntimeDirectoryMode=0700
+WorkingDirectory=/var/lib/selfx/redis
+ExecStart=/usr/bin/redis-server /etc/selfx/redis.conf
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/selfx/redis
+
+[Install]
+WantedBy=multi-user.target

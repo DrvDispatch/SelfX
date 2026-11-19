@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bot, Check, Copy, Cpu, Eye, Loader2, Paperclip, Send, Sparkles, Trash2, User, Wrench } from "lucide-react";
 import {
   ApiError,
@@ -30,7 +30,7 @@ const EXAMPLES = [
 function StepCard({ step }: { step: AgentStep }) {
   const [preview, setPreview] = useState<PreviewFile | null>(null);
   const outs = step.result?.outputs ?? [];
-  const ok = step.result?.ok !== false && step.result?.error === undefined;
+  const ok = step.result?.ok !== false && !step.result?.error;
   return (
     <div className="rounded-xl border border-line bg-surface-2 p-2.5 text-sm">
       <div className="flex items-center gap-2">
@@ -103,7 +103,10 @@ export default function Agent() {
       .then((s) => { setStatus(s); setProvider(s.default_provider); })
       .catch(() => undefined);
   }, []);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [turns, busy, attached]);
+  useEffect(() => {
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    endRef.current?.scrollIntoView({ behavior, block: "nearest" });
+  }, [turns, busy]);
 
   const addFiles = (list: FileList | File[]) => {
     const items: UploadItem[] = Array.from(list).map((file) => ({
@@ -119,7 +122,7 @@ export default function Agent() {
 
   const send = async () => {
     const msg = input.trim();
-    if ((!msg && attached.length === 0) || busy) return;
+    if (!msg || busy) return;
     setBusy(true);
     const toUpload = attached;
     const names = toUpload.map((f) => f.file.name);
@@ -127,6 +130,10 @@ export default function Agent() {
       // Upload each attachment with live progress before sending.
       const fileIds: string[] = [];
       for (const item of toUpload) {
+        if (item.id) {
+          fileIds.push(item.id);
+          continue;
+        }
         patch(item.key, { status: "uploading", progress: 0 });
         try {
           const info = await uploadFileWithProgress(item.file, (frac) => patch(item.key, { progress: frac }));
@@ -138,23 +145,24 @@ export default function Agent() {
           throw new Error(`Couldn't upload ${item.file.name}: ${detail}`);
         }
       }
-      // commit the user turn now that files are up
-      setTurns((t) => [...t, { role: "user", content: msg, files: names }]);
-      setInput("");
-      setAttached([]);
       const reply = await agentChat(msg, fileIds, provider);
-      setTurns((t) => [...t, { role: "assistant", content: reply.answer, steps: reply.steps }]);
+      setTurns((t) => [
+        ...t,
+        { role: "user", content: msg, files: names },
+        { role: "assistant", content: reply.answer, steps: reply.steps },
+      ]);
+      setInput("");
+      setAttached((files) => files.filter((file) => !toUpload.some((item) => item.key === file.key)));
     } catch (e) {
       const m = e instanceof Error ? e.message : "The assistant request failed";
       toast.error(m);
-      setTurns((t) => [...t, { role: "assistant", content: `Sorry — ${m}` }]);
     } finally {
       setBusy(false);
     }
   };
 
   const uploading = attached.some((a) => a.status === "uploading");
-  const canSend = useMemo(() => !busy && (input.trim().length > 0 || attached.length > 0), [busy, input, attached]);
+  const canSend = !busy && input.trim().length > 0;
 
   return (
     <div className="mx-auto flex h-[calc(100dvh-8rem)] max-w-3xl flex-col">
@@ -164,7 +172,7 @@ export default function Agent() {
         </span>
         <div className="mr-auto">
           <h1 className="font-bold text-fg">Assistant</h1>
-          <p className="text-xs text-muted">Ask in plain language — I&apos;ll use your tools. Files stay local.</p>
+          <p className="text-xs text-muted">{provider === "gemini" ? "Gemini receives prompts and tool context." : "Your server handles model requests and file processing."}</p>
         </div>
         {turns.length > 0 && (
           <button
@@ -285,6 +293,9 @@ export default function Agent() {
         </button>
         <textarea
           ref={taRef}
+          disabled={busy}
+          aria-label="Message"
+          maxLength={4000}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }}

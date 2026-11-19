@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute: str = "int8"
+    whisper_local_only: bool = False
     # WhisperX runs in its OWN venv (its own torch) so it can't disturb the main
     # env; transcribe shells out to this interpreter. HF token enables diarization.
     whisperx_python: str = "/root/whisperx-venv/bin/python"
@@ -53,6 +54,8 @@ class Settings(BaseSettings):
     # Which brain routes NL -> tool calls. "ollama" = fully local/offline (default);
     # "gemini" = cloud reasoning, only enabled once gemini_api_key is set.
     selfx_agent_provider: str = "ollama"  # ollama | gemini
+    selfx_planner_model: str = ""
+    selfx_planner_num_ctx: int = 8192
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     gemini_use_vertex: bool = False

@@ -1,23 +1,20 @@
 import { useRef, useState, type DragEvent } from "react";
 import { File as FileIcon, Upload, X } from "lucide-react";
 import { formatBytes } from "../format";
+import { acceptsFilename } from "../toolDiscovery";
 
 interface Props {
   accepts: string[]; // allowed extensions like [".pdf"]; empty = anything
+  formatHint?: string;
   multiple: boolean;
   files: File[];
   onChange: (files: File[]) => void;
   disabled?: boolean;
 }
 
-function matchesAccepts(name: string, accepts: string[]): boolean {
-  if (accepts.length === 0) return true;
-  const lower = name.toLowerCase();
-  return accepts.some((ext) => lower.endsWith(ext.toLowerCase()));
-}
-
 export default function FileDrop({
   accepts,
+  formatHint,
   multiple,
   files,
   onChange,
@@ -31,7 +28,7 @@ export default function FileDrop({
     const accepted: File[] = [];
     const bad: string[] = [];
     for (const f of Array.from(incoming)) {
-      if (matchesAccepts(f.name, accepts)) accepted.push(f);
+      if (acceptsFilename(f.name, accepts)) accepted.push(f);
       else bad.push(f.name);
     }
     setRejected(bad);
@@ -61,7 +58,8 @@ export default function FileDrop({
     <div>
       <div
         role="button"
-        tabIndex={0}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
         onClick={() => !disabled && inputRef.current?.click()}
         onKeyDown={(e) => {
           if (!disabled && (e.key === "Enter" || e.key === " ")) {
@@ -89,13 +87,14 @@ export default function FileDrop({
           <span className="text-primary">browse</span>
         </p>
         <p className="text-xs text-muted">
-          {accepts.length > 0 ? `Accepted: ${accepts.join(", ")}` : "Any file type"}
+          {formatHint ?? (accepts.length > 0 ? `Accepted: ${accepts.join(", ")}` : "Any file type")}
         </p>
         <input
           ref={inputRef}
           type="file"
           className="hidden"
           multiple={multiple}
+          disabled={disabled}
           accept={accepts.length > 0 ? accepts.join(",") : undefined}
           onChange={(e) => {
             if (e.target.files) addFiles(e.target.files);

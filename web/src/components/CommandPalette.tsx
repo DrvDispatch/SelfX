@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookOpen, Boxes, Clipboard, Layers, LayoutGrid, ListChecks, Search, Sparkles, Workflow, type LucideIcon } from "lucide-react";
 import { listTools } from "../api";
 import { accentVar, categoryMeta } from "../categories";
+import { matchesSearch, toolSearchText } from "../toolDiscovery";
 import type { ToolInfo } from "../types";
 
 interface Item {
@@ -12,22 +13,25 @@ interface Item {
   to: string;
   icon: LucideIcon;
   accent?: string;
+  searchText?: string;
 }
 
 const PAGES: Item[] = [
-  { id: "p-home", label: "Dashboard", sub: "All tools", to: "/", icon: LayoutGrid, accent: "quick" },
+  { id: "p-home", label: "Create", sub: "Start a workflow", to: "/", icon: Workflow, accent: "ai" },
+  { id: "p-tools", label: "Tools", sub: "Browse manual tools", to: "/tools", icon: LayoutGrid, accent: "quick" },
   { id: "p-assistant", label: "Assistant", sub: "Ask in natural language", to: "/assistant", icon: Sparkles, accent: "ai" },
   { id: "p-kb", label: "Knowledge", sub: "Chat with your documents", to: "/knowledge", icon: BookOpen, accent: "docs" },
   { id: "p-paste", label: "Paste image", sub: "Paste a screenshot to save or edit", to: "/paste", icon: Clipboard, accent: "img" },
   { id: "p-batch", label: "Batch", sub: "Run one tool over many files", to: "/batch", icon: Layers, accent: "util" },
   { id: "p-pipeline", label: "Pipeline", sub: "Chain tools together", to: "/pipeline", icon: Workflow, accent: "ai" },
-  { id: "p-jobs", label: "Jobs", sub: "History & downloads", to: "/jobs", icon: ListChecks, accent: "util" },
+  { id: "p-jobs", label: "Activity", sub: "Jobs, results and downloads", to: "/jobs", icon: ListChecks, accent: "util" },
   { id: "p-quick", label: "Quick Tools", sub: "In-browser utilities", to: "/quick-tools", icon: Boxes, accent: "quick" },
   { id: "p-models", label: "AI Models", sub: "Manage Ollama models", to: "/models", icon: Boxes, accent: "media" },
 ];
 
 export default function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate();
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
@@ -38,16 +42,22 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
   useEffect(() => {
     if (open) { setQ(""); setIdx(0); }
   }, [open]);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!open || !dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, [open]);
 
   const items = useMemo(() => {
     const toolItems: Item[] = tools.map((t) => {
       const m = categoryMeta(t.category);
-      return { id: "t-" + t.slug, label: t.name, sub: t.description, to: "/tool/" + t.slug, icon: m.icon, accent: m.accent };
+      return { id: "t-" + t.slug, label: t.name, sub: t.description, to: "/tool/" + t.slug, icon: m.icon, accent: m.accent, searchText: toolSearchText(t) };
     });
     const all = [...PAGES, ...toolItems];
     const query = q.trim().toLowerCase();
     if (!query) return all.slice(0, 60);
-    return all.filter((i) => i.label.toLowerCase().includes(query) || (i.sub ?? "").toLowerCase().includes(query)).slice(0, 60);
+    return all.filter((i) => matchesSearch(i.searchText ?? `${i.label} ${i.sub ?? ""}`, query)).slice(0, 60);
   }, [tools, q]);
 
   useEffect(() => {
@@ -59,19 +69,24 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
   const go = (it: Item) => { onClose(); navigate(it.to); };
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(i + 1, items.length - 1)); }
+    if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(i + 1, Math.max(0, items.length - 1))); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => Math.max(i - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); if (items[idx]) go(items[idx]); }
-    else if (e.key === "Escape") { onClose(); }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 pt-[12vh] backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-line bg-surface shadow-[var(--shadow-pop)]" onClick={(e) => e.stopPropagation()}>
+    <dialog
+      ref={dialogRef}
+      aria-label="Search tools and pages"
+      className="fixed top-[12vh] mx-auto w-[calc(100%-2rem)] max-w-lg overflow-hidden rounded-2xl border border-line bg-surface text-fg shadow-[var(--shadow-pop)] backdrop:bg-black/40 backdrop:backdrop-blur-sm"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <div>
         <div className="flex items-center gap-2 border-b border-line px-3">
           <Search className="h-4 w-4 text-faint" />
           <input
-            autoFocus
+            aria-label="Search tools and pages"
             value={q}
             onChange={(e) => { setQ(e.target.value); setIdx(0); }}
             onKeyDown={onKey}
@@ -103,6 +118,6 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
           })}
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

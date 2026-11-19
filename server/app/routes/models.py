@@ -4,12 +4,13 @@ import logging
 import threading
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_admin
 from ..config import settings
 from ..models import User
+from ..services.runtime_probe import probe_hardware
 
 logger = logging.getLogger("selfx.routes.models")
 router = APIRouter(prefix="/admin/models", tags=["models"])
@@ -31,6 +32,12 @@ def list_models(user: User = Depends(_admin)) -> dict:
         return {"models": r.json().get("models", []), "pulling": sorted(_pulling)}
     except Exception:
         raise HTTPException(status_code=503, detail="Ollama is not reachable") from None
+
+
+@router.get("/hardware", dependencies=[Depends(require_admin)])
+def hardware(response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return probe_hardware()
 
 
 class PullReq(BaseModel):

@@ -1,166 +1,76 @@
-# SelfX
+<p align="center">
+  <img src="web/public/selfx-mark.svg" width="72" height="72" alt="" />
+</p>
+<h1 align="center">SelfX</h1>
+<p align="center"><strong>A personal workspace for transforming files on your own machine.</strong></p>
+<p align="center">
+  <a href="#quickstart">Install SelfX</a> ·
+  <a href="docs/SELF_HOSTING.md">Self-hosting guide</a> ·
+  <a href="deploy/vps.md">Access from a VPS</a>
+</p>
 
-SelfX is a self-hosted, modular utility suite: upload a file, pick a tool, a worker
-processes it, download the result. Local-first — no external calls by default, your
-files never leave your machine. Multi-user with JWT auth, an admin panel, per-user
-rate limits, and automatic file retention cleanup.
+![SelfX Create workspace with a file drop, a workflow plan, and reusable recipes](docs/media/workspace.png)
 
-## Tools
+Drop in a file and describe the result you want. With an optional local Qwen model, SelfX drafts a workflow from its tool catalog. Review the steps, run them, and grab the finished files from **Activity**. You can also go straight to **Tools** for a one-off job.
 
-| Tool | What it does | Engine | Queue |
-|------|--------------|--------|-------|
-| `pdf-merge` | Merge PDFs (2+ files, upload order) | pikepdf | default |
-| `pdf-split` | Split PDF by page ranges, or burst every page | pikepdf | default |
-| `pdf-compress` | Compress PDF (screen/ebook/printer quality) | Ghostscript | default |
-| `pdf-to-docx` | PDF → Word | pdf2docx | heavy |
-| `office-convert` | Office/HTML/MD → PDF | Gotenberg | default |
-| `pandoc-convert` | Markup conversion (pdf/docx/html/md/epub/odt) | Pandoc | default |
-| `image-convert` | Image convert/resize (png/jpg/webp/avif/bmp/tiff) | Pillow | default |
-| `media-convert` | Audio/Video convert (mp4/webm/mp3/opus/wav/flac/gif) | ffmpeg | heavy |
-| `metadata-remove` | Strip metadata from images/PDF/office files | exiftool | default |
-| `ocr-pdf` | OCR → searchable PDF | ocrmypdf | heavy |
-| `transcribe` | Transcribe audio/video (txt/srt/vtt/json) | faster-whisper | heavy |
-| `ai-summarize` | AI summary of a document | Ollama | heavy |
-| `doc-qa` | Ask a question about a document | Ollama | heavy |
-| `archive-compress` | Compress files to zip/7z | zipfile/py7zr | default |
-| `archive-extract` | Extract zip/7z/tar safely (bomb/traversal guards) | stdlib/py7zr | default |
-| `qr-generate` | QR code from text (png/svg) | segno | default |
-
-`ai-summarize`, `doc-qa` need the `ai` profile (Ollama); `transcribe` runs on CPU by
-default and uses CUDA with the GPU override.
-
-## Architecture
-
-```
-                          ┌──────────────────────── docker network ────────────────────────┐
-                          │                                                                │
- Browser ──:8080──▶  web (nginx) ──/api/──▶  api (FastAPI :8000) ──┬──▶ db (postgres)      │
-      │                   │  serves SPA                            ├──▶ redis (RQ queues)  │
-      │                   │                                        └──▶ gotenberg :3000    │
- (proxy profile)          │                                                                │
- caddy :80/:443 ──────────┘              worker (same image as api) ◀── redis              │
-                          │                 │  runs tools: ffmpeg, gs,                     │
-                          │                 │  ocrmypdf, pandoc, whisper…                  │
-                          │                 ├──▶ ollama :11434   (ai profile)              │
-                          │                 └──▶ /data volume  (shared with api)           │
-                          │                                                                │
- Browser ──:8081──▶  stirling (extras profile, standalone PDF editor GUI)                  │
-                          └────────────────────────────────────────────────────────────────┘
-```
-
-Only `web` publishes a port in the core stack; everything else is internal.
+> Try “make this scan searchable and extract its text,” “turn this recording into a timestamped PDF and captions,” or “convert this image to WebP under 300 KB.”
 
 ## Quickstart
 
-Requirements: Docker Engine with the compose plugin (or Docker Desktop).
+SelfX installs on **Ubuntu 24.04**, including **Windows with Ubuntu 24.04 in WSL2**. The installer builds the web app and sets up PostgreSQL, Redis, and separate workers for quick and heavy jobs. Manual tools, recipes, and CPU Whisper are available before you set up an AI planner.
 
-```bash
-cp .env.example .env
-# edit .env: set SELFX_SECRET_KEY (e.g. `openssl rand -hex 32`) and SELFX_ADMIN_PASSWORD
-docker compose up -d --build
-```
+### Ubuntu
 
-Open <http://localhost:8080> and log in with the bootstrap admin
-(`SELFX_ADMIN_USER` / `SELFX_ADMIN_PASSWORD` from `.env` — created on first start
-while the users table is empty).
+~~~bash
+git clone https://github.com/DrvDispatch/SelfX.git
+cd SelfX
+sudo bash deploy/install.sh --port 8800
+~~~
 
-### Optional profiles
+SelfX starts automatically at boot. The installer binds to the local machine by default.
 
-```bash
-docker compose --profile ai up -d          # Ollama → enables ai-summarize / doc-qa
-docker compose --profile extras up -d      # Stirling-PDF GUI on http://localhost:8081
-docker compose --profile security up -d    # ClamAV upload scanning (set CLAMAV_ENABLED=true)
-docker compose --profile proxy up -d       # Caddy TLS proxy for a VPS (see deploy/vps.md)
-```
+### Windows
 
-Profiles combine: `docker compose --profile ai --profile extras up -d --build`.
+[Set up Ubuntu 24.04 in WSL2 with systemd](docs/SELF_HOSTING.md#windows-with-wsl2), then run this from PowerShell with Git installed.
 
-### Pull an Ollama model (required once for the AI tools)
+~~~powershell
+git clone https://github.com/DrvDispatch/SelfX.git
+Set-Location SelfX
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\setup-windows.ps1 -Port 8800
+~~~
 
-```bash
-docker compose exec ollama ollama pull qwen3:8b   # or whatever OLLAMA_MODEL is set to
-```
+SelfX starts automatically when you sign in to Windows. You can close the terminal after setup.
 
-### GPU acceleration (NVIDIA)
+### Open your workspace
 
-With the NVIDIA Container Toolkit installed:
+Open [http://127.0.0.1:8800](http://127.0.0.1:8800) and sign in as `admin`. Retrieve your generated password with this command in Ubuntu. On Windows, open Ubuntu first with `wsl.exe -d Ubuntu-24.04`.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile ai up -d --build
-```
+~~~bash
+sudo sed -n 's/^SELFX_ADMIN_PASSWORD=//p' /etc/selfx/selfx.env
+~~~
 
-This reserves the GPU for `worker` + `ollama` and switches whisper to
-`WHISPER_DEVICE=cuda` / `WHISPER_COMPUTE=float16`.
+Use any available port in the install command and the browser URL. For a VPS, [connect through an SSH tunnel](deploy/vps.md).
 
-## Local development
+## Pick your first task
 
-Run only the backing services from compose, plus a local override to expose their
-ports (compose auto-loads `docker-compose.override.yml`; it is gitignored):
+| I want to… | Start here |
+| --- | --- |
+| Transcribe a recording and make captions | Open **Recipes → Creator captions**. Local Whisper generates timed text that you can edit and export. |
+| Make a scan searchable | Open **Recipes → Searchable scan** for OCR and text extraction. |
+| Reorder PDF pages or shrink a video | Open **Tools** and search for **Organize PDF pages** or **Compress video to a size limit**. |
+| Reuse a workflow I described | Open **Create**, review the drafted steps, and choose **Save as recipe**. Manage, export, or import recipes in **Recipes**. |
+| See what’s running | Open **Activity** to follow a workflow step by step, download results, or retry a failed step. |
 
-```yaml
-# docker-compose.override.yml
-services:
-  db:
-    ports: ["127.0.0.1:5432:5432"]
-  redis:
-    ports: ["127.0.0.1:6379:6379"]
-```
+Recipes you save in the browser can travel with you as JSON. Uploaded files and results are stored on your SelfX host and expire according to your retention settings.
 
-```bash
-docker compose up -d db redis gotenberg
-```
+## Add local AI
 
-**Server** (Python 3.12):
+Install Ollama on the SelfX host and [enable a planner model](docs/SELF_HOSTING.md#qwen-workflow-planning). A small Qwen model at an 8K context is a practical starting point. **AI models** shows the host’s hardware and context estimates so you can choose a size to try.
 
-```bash
-cd server
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-export SELFX_SECRET_KEY=dev-secret-not-for-prod
-export DATABASE_URL=postgresql+psycopg://selfx:selfx@localhost:5432/selfx
-export REDIS_URL=redis://localhost:6379/0
-export DATA_DIR=$PWD/../data
-uvicorn app.main:app --reload --port 8000    # API
-python -m app.worker                          # worker, second terminal, same env
-```
+The planner receives your instruction and file type. SelfX checks its proposed actions and runs the reviewed workflow through the same file tools you can use manually. Whisper runs separately and caches its models after the first download. [Configure Whisper and Qwen](docs/SELF_HOSTING.md#local-models)
 
-**Web** (Node 20+):
+## Run and extend SelfX
 
-```bash
-cd web
-npm install
-npm run dev        # http://localhost:5173, /api proxied to http://localhost:8000
-```
-
-## Troubleshooting
-
-- **Port already in use** — the stack publishes `8080` (web), `8081` (stirling,
-  extras) and `80`/`443` (caddy, proxy). Change the host side of the mapping in
-  `docker-compose.yml` if something else owns them.
-- **`api` never becomes healthy** — `docker compose logs api`. Most common: default
-  `SELFX_SECRET_KEY` (startup fails loudly on purpose), or db credentials in
-  `DATABASE_URL` not matching `POSTGRES_*`.
-- **AI tools listed as unavailable** — the `ai` profile isn't running, or no model is
-  pulled yet: `docker compose exec ollama ollama pull qwen3:8b`. Model pulls are
-  several GB; watch `docker compose logs -f ollama`.
-- **First transcription is slow** — faster-whisper downloads `WHISPER_MODEL` on first
-  use inside the worker; subsequent runs are fast.
-- **Worker killed / jobs die on big media or AI jobs** — the worker has a hard memory
-  cap (`WORKER_MEM_LIMIT`, default 6g). Raise it, or use a smaller `WHISPER_MODEL` /
-  `OLLAMA_MODEL`.
-- **ClamAV rejects everything right after start** — clamd needs a few minutes to
-  download signatures on first boot; check `docker compose logs clamav`.
-- **Uploads fail with 413** — file exceeds `MAX_UPLOAD_MB` (default 512).
-
-## Adding a tool
-
-Every tool is a single Python file in `server/app/tools/` — a `Tool` subclass with a
-`@register` decorator. It is auto-discovered at startup: the API lists it, the
-frontend renders its form from `params_schema`, and the worker runs it. No other file
-needs editing. Full walkthrough (with a working `video-thumbnail` ffmpeg example):
-[docs/ADDING_TOOLS.md](docs/ADDING_TOOLS.md).
-
-## Deployment on a VPS
-
-See [deploy/vps.md](deploy/vps.md): DNS, `.env` hardening, `--profile proxy` for
-automatic TLS via Caddy, and firewall notes.
+- [Manage services, update, and back up your data](docs/SELF_HOSTING.md)
+- [Add a tool](docs/ADDING_TOOLS.md)
+- [Report a bug or suggest a recipe](https://github.com/DrvDispatch/SelfX/issues/new/choose)

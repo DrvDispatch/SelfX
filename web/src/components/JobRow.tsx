@@ -1,111 +1,83 @@
 import { useState } from "react";
-import { Eye, Trash2, XCircle } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Clock3, Eye, FileText, Trash2, XCircle } from "lucide-react";
 import type { Job } from "../types";
 import { formatDate, formatDuration } from "../format";
+import { jobStep, jobTitle } from "../jobProgress";
 import FilePreview from "./FilePreview";
 import StatusBadge from "./StatusBadge";
 
 interface Props {
   job: Job;
   highlighted: boolean;
+  pending?: boolean;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
 }
 
-export default function JobRow({ job, highlighted, onCancel, onDelete }: Props) {
+export default function JobRow({ job, highlighted, pending, onCancel, onDelete }: Props) {
   const [preview, setPreview] = useState<Job["output_files"][number] | null>(null);
   const active = job.status === "queued" || job.status === "running";
-  const pct = Math.round(Math.min(1, Math.max(0, job.progress)) * 100);
+  const workflow = job.tool.startsWith("workflow:");
+  const step = active ? jobStep(job) : null;
+  const inputs = job.input_files.map((file) => file.orig_name).join(", ");
 
   return (
-    <tr
-      className={[
-        "border-b border-line text-sm transition-colors",
-        highlighted ? "bg-primary-soft" : "hover:bg-surface-2",
-      ].join(" ")}
-    >
-      <td className="px-3 py-2.5 align-top">
-        <div className="font-medium text-fg">{job.tool}</div>
-        <div className="mt-0.5 truncate text-xs text-muted" title={job.input_files.map((f) => f.orig_name).join(", ")}>
-          {job.input_files.length > 0
-            ? job.input_files.map((f) => f.orig_name).join(", ")
-            : "no input files"}
-        </div>
-      </td>
-      <td className="px-3 py-2.5 align-top">
-        <StatusBadge status={job.status} />
-        {job.status === "error" && job.error && (
-          <div className="mt-1 max-w-56 text-xs text-danger" title={job.error}>
-            {job.error}
-          </div>
-        )}
-        {active && job.message && (
-          <div className="mt-1 max-w-56 truncate text-xs text-muted" title={job.message}>
-            {job.message}
-          </div>
-        )}
-      </td>
-      <td className="w-40 px-3 py-2.5 align-top">
-        {active ? (
-          <div>
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-              <div
-                className="h-full rounded-full bg-primary transition-all duration-500"
-                style={{ width: `${job.status === "queued" ? 0 : pct}%` }}
-              />
-            </div>
-            <div className="mt-1 text-xs text-muted">
-              {job.status === "queued" ? "waiting…" : `${pct}%`}
-            </div>
-          </div>
-        ) : (
-          <span className="text-xs text-faint">
-            {job.status === "done" ? "100%" : "—"}
+    <li className={`rounded-xl border bg-surface p-4 ${highlighted ? "border-primary" : "border-line"}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary">
+            <FileText aria-hidden className="size-4" />
           </span>
-        )}
-      </td>
-      <td className="whitespace-nowrap px-3 py-2.5 align-top text-xs text-muted">
-        {formatDate(job.created_at)}
-      </td>
-      <td className="whitespace-nowrap px-3 py-2.5 align-top text-xs text-muted">
-        {formatDuration(job.started_at, job.finished_at)}
-      </td>
-      <td className="px-3 py-2.5 align-top">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {job.output_files.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              onClick={() => setPreview(f)}
-              title={`Preview ${f.orig_name}`}
-              className="flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-line"
-            >
-              <Eye className="h-3.5 w-3.5" />
-              <span className="max-w-36 truncate">{f.orig_name}</span>
+          <div className="min-w-0">
+            {workflow ? (
+              <Link className="break-words text-sm font-semibold text-fg underline-offset-2 hover:underline" to={`/runs/${job.id}`}>
+                {jobTitle(job)}
+              </Link>
+            ) : <h3 className="text-sm font-semibold text-fg">{jobTitle(job)}</h3>}
+            {inputs && <p title={inputs} className="mt-0.5 truncate text-xs text-muted">{inputs}</p>}
+          </div>
+        </div>
+        <StatusBadge status={job.status} />
+      </div>
+      {step && (
+        <div className="mt-3 space-y-1.5">
+          <p className="text-sm text-muted"><span className="mr-2 font-medium text-fg">{step.label}</span>{step.detail}</p>
+          {job.status === "running" && <progress className="h-1.5 w-full accent-primary" aria-label={`${jobTitle(job)} progress`}
+            max={100} value={step.percent > 0 ? step.percent : undefined} />}
+        </div>
+      )}
+      {job.status === "error" && job.error && <p className="mt-3 break-words text-sm text-danger">{job.error}</p>}
+      {job.output_files.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {job.output_files.map((file) => (
+            <button key={file.id} type="button" onClick={() => setPreview(file)}
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs font-medium text-primary hover:bg-primary-soft">
+              <Eye aria-hidden className="size-3.5 shrink-0" /><span className="break-all">{file.orig_name}</span>
             </button>
           ))}
-          {active && (
-            <button
-              type="button"
-              onClick={() => onCancel(job.id)}
-              title="Cancel job"
-              className="flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs font-medium text-warn transition-colors hover:bg-line"
-            >
-              <XCircle className="h-3.5 w-3.5" />
-              Cancel
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => onDelete(job.id)}
-            title="Delete job and outputs"
-            className="grid h-7 w-7 place-items-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-danger"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
         </div>
-        {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
-      </td>
-    </tr>
+      )}
+      <div className="mt-3 flex min-h-8 flex-wrap items-center justify-between gap-2 text-xs text-muted">
+        <span className="inline-flex items-center gap-1.5">
+          <Clock3 aria-hidden className="size-3.5" /> {formatDate(job.created_at)}
+          {job.finished_at && job.started_at && ` · ${formatDuration(job.started_at, job.finished_at)}`}
+        </span>
+        {job.status === "queued" && (
+          <button type="button" disabled={pending} onClick={() => onCancel(job.id)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 font-medium hover:bg-surface-2 disabled:opacity-50">
+            <XCircle aria-hidden className="size-3.5" /> Cancel
+          </button>
+        )}
+        {!active && (
+          <button type="button" disabled={pending} onClick={() => onDelete(job.id)}
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-2 font-medium hover:bg-surface-2 hover:text-danger disabled:opacity-50"
+            aria-label={`Delete ${jobTitle(job)} job and outputs`}>
+            <Trash2 aria-hidden className="size-3.5" /> Delete
+          </button>
+        )}
+      </div>
+      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
+    </li>
   );
 }

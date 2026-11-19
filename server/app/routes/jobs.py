@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import time
+from typing import Literal
 from uuid import UUID
 
 import jsonschema
@@ -12,18 +13,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from redis import asyncio as aioredis
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session, selectinload
 
 from .. import storage
 from ..auth import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models import File, Job, User, utcnow
+from ..models import File, Job, User, WorkflowRun, utcnow
 from ..queueing import JOB_EVENTS_CHANNEL, cancel_rq_job, enqueue_batch, enqueue_job, enqueue_pipeline
 from ..ratelimit import RATE_LIMIT, limiter
 from ..schemas import FileInfo, JobCreate, JobList, JobOut
 from ..services.jobs import create_and_run_job
+from ..services.workflows import outputs_in_use
 from ..tools.base import Tool
 from ..tools.registry import get_tool
 
@@ -42,8 +44,10 @@ ARCHIVE_MIMES: dict[str, set[str]] = {
 }
 
 
-def job_to_schema(job: Job) -> JobOut:
+def job_to_schema(job: Job, workflow_source: File | None = None) -> JobOut:
     inputs = sorted((f for f in job.files if f.kind == "upload"), key=lambda f: f.created_at)
+    if workflow_source is not None:
+        inputs.append(workflow_source)
     outputs = sorted((f for f in job.files if f.kind == "output"), key=lambda f: f.orig_name)
     return JobOut(
         id=job.id,
@@ -61,8 +65,8 @@ def job_to_schema(job: Job) -> JobOut:
     )
 
 
-def get_owned_job(job_id: UUID, user: User, db: Session) -> Job:
-    job = db.get(Job, job_id)
+def get_owned_job(job_id: UUID, user: User, db: Session, *, lock: bool = False) -> Job:
+    job = db.get(Job, job_id, with_for_update=lock)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
     if job.user_id != user.id and not user.is_admin:
@@ -270,6 +274,8 @@ def create_pipeline(
             jsonschema.validate(instance=step.params or {}, schema=tool.params_schema)
         except jsonschema.ValidationError as exc:
             raise HTTPException(status_code=422, detail=f"step {i + 1}: invalid params: {exc.message}") from None
+        if i < len(payload.steps) - 1 and tool.slug == "transcribe" and step.params.get("output") == "all":
+            raise HTTPException(422, f"Step {i + 1} must use a single transcription format")
         resolved.append(tool)
 
     # Validate the single input file against the FIRST step's accepts.
@@ -298,8 +304,8 @@ def create_pipeline(
     redacted_steps = [{"tool": s.tool, "params": _redact_params(s.params or {})} for s in payload.steps]
     queue = "heavy" if any(t.queue == "heavy" for t in resolved) else "default"
 
-    labels = "→".join(t.slug for t in resolved)
-    job = Job(user_id=user.id, tool=f"pipeline:{labels}"[:255], status="queued",
+    label = "→".join(t.slug for t in resolved)
+    job = Job(user_id=user.id, tool=f"pipeline:{label}"[:64], status="queued",
               params={"steps": redacted_steps})
     db.add(job)
     db.flush()
@@ -378,20 +384,36 @@ async def stream_jobs(request: Request, user: User = Depends(get_current_user)) 
 def list_jobs(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    state: Literal["all", "active", "done", "error"] = "all",
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JobList:
-    total = db.scalar(select(func.count()).select_from(Job).where(Job.user_id == user.id)) or 0
+    filters = [Job.user_id == user.id]
+    ordering = [Job.created_at.desc(), Job.id.desc()]
+    if state == "active":
+        filters.append(Job.status.in_(("queued", "running")))
+        ordering.insert(0, case((Job.status == "running", 0), else_=1))
+    elif state != "all":
+        filters.append(Job.status == state)
+    total = db.scalar(select(func.count()).select_from(Job).where(*filters)) or 0
     jobs = (
         db.scalars(
             select(Job)
-            .where(Job.user_id == user.id)
-            .order_by(Job.created_at.desc())
+            .where(*filters)
+            .options(selectinload(Job.files))
+            .order_by(*ordering)
             .limit(limit)
             .offset(offset)
         ).all()
     )
-    return JobList(items=[job_to_schema(j) for j in jobs], total=total)
+    workflow_ids = [job.id for job in jobs if job.tool.startswith("workflow:")]
+    sources = {}
+    if workflow_ids:
+        sources = dict(db.execute(
+            select(WorkflowRun.job_id, File).join(File, File.id == WorkflowRun.source_file_id)
+            .where(WorkflowRun.job_id.in_(workflow_ids))
+        ).all())
+    return JobList(items=[job_to_schema(job, sources.get(job.id)) for job in jobs], total=total)
 
 
 @router.get("/{job_id}", response_model=JobOut)
@@ -409,7 +431,7 @@ def cancel_job(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JobOut:
-    job = get_owned_job(job_id, user, db)
+    job = get_owned_job(job_id, user, db, lock=True)
     if job.status != "queued":
         raise HTTPException(
             status_code=409, detail=f"only queued jobs can be canceled (status: {job.status})"
@@ -430,9 +452,13 @@ def delete_job(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    job = get_owned_job(job_id, user, db)
+    job = get_owned_job(job_id, user, db, lock=True)
     if job.status == "running":
         raise HTTPException(status_code=409, detail="cannot delete a running job")
+    if outputs_in_use(db, job.id):
+        raise HTTPException(status_code=409, detail="An active workflow is using these results")
+    if job.status == "queued" and job.rq_job_id:
+        cancel_rq_job(job.rq_job_id)
     for f in list(job.files):
         if f.kind == "output":
             storage.delete_stored_file(f.stored_path)

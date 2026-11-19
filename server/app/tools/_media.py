@@ -12,10 +12,13 @@ import re
 from ..config import settings
 from .base import ToolContext, ToolError
 
-# Codecs that show up as a "video" stream but are really attached cover art
-# (album art in an mp3/flac, a poster in an m4a). They must NOT count as a real
-# video track when deciding whether a video preset is applicable.
-_COVER_ART_CODECS = {"mjpeg", "png", "bmp", "gif", "jpeg", "tiff", "webp"}
+# File-only inputs for bounded tools and workflows. Formats that can introduce
+# independently referenced inputs are outside this list.
+LOCAL_INPUT_OPTIONS = (
+    "-protocol_whitelist", "file,pipe",
+    "-format_whitelist", "aac,ac3,aiff,asf,ass,avi,flac,flv,matroska,webm,mov,mp3,mpeg,mpegts,ogg,srt,wav,webvtt",
+    "-max_streams", "16",
+)
 
 _TIME_RE = re.compile(r"^(?:\d+(?:\.\d+)?|\d{1,3}(?::[0-5]?\d){1,2}(?:\.\d+)?)$")
 
@@ -43,25 +46,27 @@ def max_output_bytes() -> int:
         return 1024 * 1024 * 1024
 
 
-def probe(ctx: ToolContext, src) -> dict:
+def probe(ctx: ToolContext, src, *, local_input: bool = False, timeout: int = 60) -> dict:
     """Inspect a media file with a single ffprobe call.
 
     Returns a dict with keys: video (bool), audio (bool), vcodec, acodec,
-    abitrate (bits/s), asample_rate, width, height, duration (seconds). Missing
+    abitrate (bits/s), asample_rate, width, height, duration and video_duration (seconds). Missing
     or unreadable values come back as None/False — never raises.
     """
     info = {
         "video": False, "audio": False, "vcodec": None, "acodec": None,
         "abitrate": None, "asample_rate": None, "width": None, "height": None,
         "duration": None,
+        "video_duration": None,
     }
     try:
         proc = ctx.run_cmd(
-            ["ffprobe", "-v", "error",
+            ["ffprobe", "-v", "error", *(LOCAL_INPUT_OPTIONS if local_input else ()),
              "-show_entries",
-             "stream=codec_type,codec_name,bit_rate,sample_rate,width,height:format=duration",
+             ("stream=codec_type,codec_name,bit_rate,sample_rate,width,height,duration:"
+              "stream_disposition=attached_pic:format=duration"),
              "-of", "json", str(src)],
-            timeout=60,
+            timeout=timeout,
         )
         data = json.loads(proc.stdout or "{}")
     except (ToolError, ValueError, TypeError):
@@ -71,19 +76,19 @@ def probe(ctx: ToolContext, src) -> dict:
         ctype = stream.get("codec_type")
         cname = stream.get("codec_name")
         if ctype == "video":
-            if cname in _COVER_ART_CODECS:
+            if (stream.get("disposition") or {}).get("attached_pic"):
                 continue  # attached picture, not a real video track
             if not info["video"]:
                 info["video"] = True
                 info["vcodec"] = cname
                 info["width"] = _to_int(stream.get("width"))
                 info["height"] = _to_int(stream.get("height"))
-        elif ctype == "audio":
-            if not info["audio"]:
-                info["audio"] = True
-                info["acodec"] = cname
-                info["abitrate"] = _to_int(stream.get("bit_rate"))
-                info["asample_rate"] = _to_int(stream.get("sample_rate"))
+                info["video_duration"] = _to_float(stream.get("duration"))
+        elif ctype == "audio" and not info["audio"]:
+            info["audio"] = True
+            info["acodec"] = cname
+            info["abitrate"] = _to_int(stream.get("bit_rate"))
+            info["asample_rate"] = _to_int(stream.get("sample_rate"))
     info["duration"] = _to_float((data.get("format") or {}).get("duration"))
     return info
 
