@@ -5,8 +5,9 @@
 <p align="center"><strong>A personal workspace for transforming files on your own machine.</strong></p>
 <p align="center">
   <a href="#quickstart">Install SelfX</a> ·
-  <a href="docs/SELF_HOSTING.md">Self-hosting guide</a> ·
-  <a href="deploy/vps.md">Access from a VPS</a>
+  <a href="#features">Features</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="docs/TOOLS.md">Tool catalog</a>
 </p>
 
 ![SelfX Create workspace with a file drop, a workflow plan, and reusable recipes](docs/media/workspace.png)
@@ -14,6 +15,25 @@
 Drop in a file and describe the result you want. With an optional local Qwen model, SelfX drafts a workflow from its tool catalog. Review the steps, run them, and grab the finished files from **Activity**. You can also go straight to **Tools** for a one-off job.
 
 > Try “make this scan searchable and extract its text,” “turn this recording into a timestamped PDF and captions,” or “convert this image to WebP under 300 KB.”
+
+## Features
+
+- **Turn a prompt into a workflow.** Optional local Qwen drafts a plan of up to six steps using 15 supported actions. Review the steps before running them.
+- **Save and share recipes.** Start with six templates, build a workflow from a prompt, or run a saved recipe on a new file. Saved recipes live in your browser and can be shared as JSON.
+- **Transcribe and edit locally.** Whisper transcribes audio and video on your SelfX host. Play the original recording, adjust the text and timing, and export TXT, SRT, WebVTT, timed JSON, or a timestamped PDF with captions.
+- **See what’s happening.** Track queued and running jobs in Activity, see each workflow step, preview or download the results, and retry failed runs. Use Batch for repeated tasks or Pipeline to build a sequence by hand.
+- **Work with documents using local AI.** Connect Ollama for summaries, document Q&A, and searchable knowledge collections. The hardware check estimates which model sizes and context lengths to try.
+- **Host it on your own machine.** Choose the port. SelfX starts at boot on Ubuntu or at Windows sign-in through WSL2.
+
+| Tool family | What you can do |
+| --- | --- |
+| PDFs and documents | Merge, split, compress, reorder, protect, or watermark a PDF. Make a scan searchable, extract text, and convert Office files and ebooks. |
+| Video and audio | Trim, crop, join, resize, and compress video. Extract audio, normalize loudness, reduce background noise, and generate GIFs. |
+| Images | Convert, resize, optimize to a file size, remove backgrounds, or upscale. |
+| Subtitles | Extract, convert, clean up, sync, and burn captions into video. |
+| Utilities | Make archives, QR codes, and barcodes. Check file hashes or remove metadata. |
+
+[Browse all 63 built-in tools and their requirements](docs/TOOLS.md).
 
 ## Quickstart
 
@@ -62,6 +82,14 @@ Use any available port in the install command and the browser URL. For a VPS, [c
 | See what’s running | Open **Activity** to follow a workflow step by step, download results, or retry a failed step. |
 
 Recipes you save in the browser can travel with you as JSON. Uploaded files and results are stored on your SelfX host and expire according to your retention settings.
+
+## Screenshots
+
+| Recipe library | Manual tools |
+| --- | --- |
+| [![SelfX Recipes with starter workflows and a saved image recipe](docs/media/recipes.png)](docs/media/recipes.png) | [![SelfX Tools with search, category filters, and suggested tools](docs/media/tools.png)](docs/media/tools.png) |
+| **Workflow results** | **Transcript editor** |
+| [![Completed transcription workflow with its steps and downloadable PDF, SRT, and JSON files](docs/media/workflow.png)](docs/media/workflow.png) | [![Transcript segments with audio playback, editable timestamps, and export controls](docs/media/transcript.png)](docs/media/transcript.png) |
 
 ## Add local AI
 
